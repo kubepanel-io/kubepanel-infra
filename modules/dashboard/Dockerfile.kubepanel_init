@@ -1,0 +1,12 @@
+# Use Ubuntu as the base image
+FROM laszlokulcsar/kubepanelbase:v0.1
+RUN apt update -y; apt install mariadb-client -y
+RUN mkdir -p /kubepanel/
+RUN mkdir -p /root/.ssh/
+RUN ssh-keyscan github.com >> /root/.ssh/known_hosts;
+#COPY id_rsa /root/.ssh/id_rsa
+#RUN chmod 400 /root/.ssh/id_rsa
+COPY init_entrypoint.sh /entrypoint.sh
+USER root
+ENTRYPOINT /entrypoint.sh
+

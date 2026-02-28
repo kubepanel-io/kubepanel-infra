@@ -1,0 +1,33 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+    imagemagick \
+    php8.3-redis \
+    php8.3-imagick \
+    php8.3-fpm \
+    php8.3-mysql \
+    php8.3-curl \
+    php8.3-gd \
+    php8.3-mbstring \
+    php8.3-xml \
+    php8.3-xmlrpc \
+    php8.3-soap \
+    php8.3-intl \
+    php8.3-zip \
+    sendmail \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g 7777 webgroup && \
+    useradd -u 7777 -g webgroup -m webuser
+RUN ln -sf /proc/1/fd/1 /var/log/php8.3-fpm.log
+COPY www.conf /etc/php/8.3/fpm/pool.d/www.conf
+COPY php-fpm83.conf /etc/php/8.3/fpm/php-fpm.conf
+COPY php83.ini /etc/php/8.3/fpm/php.ini
+# Create version-agnostic config path for KubePanel
+RUN mkdir -p /etc/php-custom && \
+    ln -sf /etc/php-custom/kubepanel.ini /etc/php/8.3/fpm/conf.d/99-kubepanel.ini
+RUN chown -R webuser:webgroup /var/run /run /etc/php/8.3/fpm/pool.d /var/run/php
+USER webuser
+EXPOSE 9001
+CMD ["sh", "-c", "php-fpm8.3 -F;"]
+

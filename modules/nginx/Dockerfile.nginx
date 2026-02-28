@@ -1,0 +1,67 @@
+# Use Ubuntu as the base image
+FROM ubuntu:24.04
+
+# Prevent Ubuntu's apt-get from prompting for input (e.g., timezone data)
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Nginx with ModSecurity module and curl for GeoIP download
+RUN apt-get update -y && apt-get install -y \
+    nginx \
+    libnginx-mod-http-modsecurity \
+    libmodsecurity3 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create ModSecurity config directory
+RUN mkdir -p /etc/nginx/modsec
+
+# Download GeoIP database for geo-blocking support
+RUN mkdir -p /etc/nginx/geoip && \
+    curl -fsSL https://raw.githubusercontent.com/kubepanel-io/kubepanel/refs/heads/main/GeoLite2-Country.mmdb \
+    -o /etc/nginx/geoip/GeoLite2-Country.mmdb
+
+# Create minimal ModSecurity base config (since Ubuntu 24.04 doesn't include modsecurity.conf-recommended)
+RUN cat > /etc/nginx/modsec/modsecurity.conf << 'EOF'
+# Minimal ModSecurity configuration for KubePanel DomainWAF
+SecRuleEngine On
+SecRequestBodyAccess On
+SecRequestBodyLimit 13107200
+SecRequestBodyNoFilesLimit 131072
+SecResponseBodyAccess Off
+SecTmpDir /tmp/
+SecDataDir /tmp/
+SecAuditEngine Off
+SecArgumentSeparator &
+SecCookieFormat 0
+SecStatusEngine Off
+EOF
+
+# Create main.conf that includes modsecurity.conf and custom rules
+RUN echo 'Include /etc/nginx/modsec/modsecurity.conf' > /etc/nginx/modsec/main.conf && \
+    echo 'Include /etc/nginx/modsec/rules.conf' >> /etc/nginx/modsec/main.conf
+
+# Create empty rules.conf (will be mounted from ConfigMap when DomainWAF is enabled)
+RUN touch /etc/nginx/modsec/rules.conf
+
+# Create a new user and group (non-root)
+RUN groupadd -g 7777 webgroup && \
+    useradd -u 7777 -g webgroup -m webuser
+
+# Change ownership of the nginx directories to the new user
+RUN chown -R webuser:webgroup /var/www/html /var/log/nginx /var/lib/nginx /var/run /run /etc/nginx/modsec /etc/nginx/geoip
+
+# Setup document root
+RUN mkdir -p /var/www/html/
+
+# Adjust permissions to allow Nginx to access the document root
+RUN chown -R webuser:webgroup /var/www/html
+
+# Run Nginx as non-root user
+USER webuser
+RUN ln -sf /proc/1/fd/1 /var/log/nginx/access.log
+
+# Expose port 8080 for Nginx (non-root users can't bind to ports below 1024)
+EXPOSE 8080
+
+# Start Nginx on container start
+CMD ["sh", "-c", "nginx -g 'daemon off;'"]

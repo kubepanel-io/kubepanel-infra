@@ -1,0 +1,14 @@
+FROM ubuntu:latest
+
+# Create opendkim user/group with known GID before package install
+# This allows us to use fsGroup in Kubernetes to set proper file ownership
+RUN groupadd -g 999 opendkim && \
+    useradd -u 999 -g 999 -r -s /usr/sbin/nologin opendkim
+
+RUN apt update && DEBIAN_FRONTEND=noninteractive apt install -yq opendkim openssl && mkdir /etc/opendkim
+COPY TrustedHosts /etc/opendkim/TrustedHosts
+COPY opendkim.conf /etc/opendkim.conf
+COPY opendkim /etc/default/opendkim
+COPY opendkim_entrypoint.sh /entrypoint.sh
+EXPOSE 8891
+ENTRYPOINT /entrypoint.sh

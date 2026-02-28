@@ -1,0 +1,18 @@
+# KubePanel Restore Container
+# Contains tools for restoring from backup: rsync, mysql client, kubectl
+FROM laszlokulcsar/kubepanelbase:v0.1
+
+# Install required tools
+RUN ls && apt-get update && apt-get install -y \
+    mariadb-client \
+    rsync \
+    zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy restore script
+COPY restore.sh /restore.sh
+
+RUN chmod +x /restore.sh
+
+# Default entrypoint
+ENTRYPOINT ["/restore.sh"]

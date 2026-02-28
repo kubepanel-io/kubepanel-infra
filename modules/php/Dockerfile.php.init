@@ -1,0 +1,7 @@
+# Use Ubuntu as the base image
+FROM ubuntu:20.04
+RUN apt update -y; apt install dnsutils -y; apt install iptables -y; apt install unzip -y; apt install curl -y;
+USER root
+COPY php_init_entrypoint.sh /entrypoint.sh
+ENTRYPOINT /entrypoint.sh
+

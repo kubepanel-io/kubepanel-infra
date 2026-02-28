@@ -1,0 +1,21 @@
+# KubePanel Backup Container
+# Contains mariabackup for database backups and kubectl for K8s operations
+FROM laszlokulcsar/kubepanelbase:v0.1
+
+# Install mariadb-backup (mariabackup) and compression tools
+RUN apt-get update && apt-get install -y \
+    mariadb-backup \
+    mariadb-client \
+    zstd \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy backup scripts
+COPY backup.sh /backup.sh
+COPY cleanup.sh /cleanup.sh
+COPY nightly-backup.sh /nightly-backup.sh
+
+RUN chmod +x /backup.sh /cleanup.sh /nightly-backup.sh
+
+# Default entrypoint - can be overridden by Job spec
+ENTRYPOINT ["/backup.sh"]

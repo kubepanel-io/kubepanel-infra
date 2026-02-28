@@ -1,0 +1,5 @@
+FROM laszlokulcsar/kubepanelbase:v0.1
+RUN apt update -y; apt install curl mariadb-client -y
+COPY create_db.sh /create_db.sh
+COPY delete_db.sh /delete_db.sh
+COPY backup_db.sh /backup_db.sh

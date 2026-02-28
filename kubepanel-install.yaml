@@ -1,0 +1,3737 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubepanel
+---
+# =============================================================================
+# Calico IPPool for KubePanel Dashboard - Used for trusted SMTP access
+# Pods with annotation cni.projectcalico.org/ipv4pools: '["kubepanel-dashboard-pool"]'
+# will get IPs from this pool, which is trusted by Postfix mynetworks
+# =============================================================================
+apiVersion: crd.projectcalico.org/v1
+kind: IPPool
+metadata:
+  name: kubepanel-dashboard-pool
+spec:
+  cidr: 10.245.0.0/24
+  ipipMode: Always
+  natOutgoing: true
+  nodeSelector: all()
+---
+# =============================================================================
+# Backup CRD - Manages backup records for domains
+# =============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backups.kubepanel.io
+  annotations:
+    kubepanel.io/version: "v1alpha1"
+    kubepanel.io/description: "Backup resource for KubePanel domain backups"
+spec:
+  group: kubepanel.io
+  names:
+    kind: Backup
+    listKind: BackupList
+    plural: backups
+    singular: backup
+    shortNames:
+      - bak
+  scope: Namespaced  # Lives in domain namespace (dom-example-com)
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Domain
+          type: string
+          jsonPath: .spec.domainName
+        - name: Type
+          type: string
+          jsonPath: .spec.type
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Started
+          type: string
+          jsonPath: .status.startedAt
+        - name: Completed
+          type: string
+          jsonPath: .status.completedAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - domainName
+              properties:
+                domainName:
+                  type: string
+                  description: "Domain name this backup belongs to (e.g., example.com)"
+                  maxLength: 253
+                type:
+                  type: string
+                  description: "Backup trigger type"
+                  enum:
+                    - scheduled
+                    - manual
+                  default: manual
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase of the backup"
+                  enum:
+                    - Pending
+                    - Running
+                    - Completed
+                    - Failed
+                message:
+                  type: string
+                  description: "Human-readable status message"
+                  maxLength: 1024
+                volumeSnapshotName:
+                  type: string
+                  description: "Name of the VolumeSnapshot created for filesystem backup"
+                databaseBackupPath:
+                  type: string
+                  description: "Path to the mariabackup archive on the backup PVC"
+                sizeBytes:
+                  type: integer
+                  format: int64
+                  description: "Total size of the backup in bytes"
+                startedAt:
+                  type: string
+                  format: date-time
+                  description: "Timestamp when backup started"
+                completedAt:
+                  type: string
+                  format: date-time
+                  description: "Timestamp when backup completed"
+                retentionExpiresAt:
+                  type: string
+                  format: date-time
+                  description: "Timestamp when this backup should be deleted (7 days from creation)"
+---
+# =============================================================================
+# Restore CRD - Manages domain restore operations
+# =============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: restores.kubepanel.io
+  annotations:
+    kubepanel.io/version: "v1alpha1"
+    kubepanel.io/description: "Restore resource for KubePanel domain restores"
+spec:
+  group: kubepanel.io
+  names:
+    kind: Restore
+    listKind: RestoreList
+    plural: restores
+    singular: restore
+    shortNames:
+      - rst
+  scope: Namespaced  # Lives in domain namespace (dom-example-com)
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Domain
+          type: string
+          jsonPath: .spec.domainName
+        - name: Backup
+          type: string
+          jsonPath: .spec.backupName
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Started
+          type: string
+          jsonPath: .status.startedAt
+        - name: Completed
+          type: string
+          jsonPath: .status.completedAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - domainName
+              properties:
+                domainName:
+                  type: string
+                  description: "Domain name to restore (e.g., example.com)"
+                  maxLength: 253
+                backupName:
+                  type: string
+                  description: "Name of the Backup CR to restore from (optional for uploaded restores)"
+                  maxLength: 253
+                restoreType:
+                  type: string
+                  description: "Type of restore: snapshot (from VolumeSnapshot) or uploaded (from tar.gz archive)"
+                  enum:
+                    - snapshot
+                    - uploaded
+                  default: snapshot
+                volumeSnapshotName:
+                  type: string
+                  description: "Name of the VolumeSnapshot to restore (required for snapshot restores)"
+                  maxLength: 253
+                databaseBackupPath:
+                  type: string
+                  description: "Path to the database backup file (from Backup status)"
+                  maxLength: 1024
+                uploadedArchivePath:
+                  type: string
+                  description: "Path to uploaded tar.gz archive on backup PVC (required for uploaded restores)"
+                  maxLength: 1024
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase of the restore"
+                  enum:
+                    - Pending
+                    - Running
+                    - Completed
+                    - Failed
+                message:
+                  type: string
+                  description: "Human-readable status message"
+                  maxLength: 1024
+                startedAt:
+                  type: string
+                  format: date-time
+                  description: "Timestamp when restore started"
+                completedAt:
+                  type: string
+                  format: date-time
+                  description: "Timestamp when restore completed"
+---
+# =============================================================================
+# Domain CRD - Manages web hosting domains
+# =============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: domains.kubepanel.io
+  annotations:
+    kubepanel.io/version: "v1alpha1"
+    kubepanel.io/description: "Domain resource for KubePanel web hosting"
+spec:
+  group: kubepanel.io
+  names:
+    kind: Domain
+    listKind: DomainList
+    plural: domains
+    singular: domain
+    shortNames:
+      - dom
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Domain
+          type: string
+          jsonPath: .spec.domainName
+        - name: Storage
+          type: string
+          jsonPath: .spec.resources.storage
+        - name: Workload
+          type: string
+          jsonPath: .spec.workload.type
+        - name: Version
+          type: string
+          jsonPath: .spec.workload.version
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - domainName
+                - resources
+                - workload
+              x-kubernetes-validations:
+                - rule: "self.domainName == oldSelf.domainName"
+                  message: "domainName is immutable after creation"
+              properties:
+                domainName:
+                  type: string
+                  description: "Primary domain name (e.g., example.com)"
+                  pattern: "^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z]{2,})+$"
+                  maxLength: 253
+
+                title:
+                  type: string
+                  description: "Human-readable title for the domain"
+                  maxLength: 255
+
+                aliases:
+                  type: array
+                  description: "Additional domain names pointing to this site, optionally with email config"
+                  maxItems: 100
+                  items:
+                    type: object
+                    required:
+                      - name
+                    properties:
+                      name:
+                        type: string
+                        description: "Alias domain name"
+                        pattern: "^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z]{2,})+$"
+                        maxLength: 253
+                      email:
+                        type: object
+                        description: "Email configuration for this alias"
+                        properties:
+                          enabled:
+                            type: boolean
+                            description: "Enable email for this alias domain"
+                          dkimSelector:
+                            type: string
+                            description: "DKIM selector (default: default)"
+                            pattern: "^[a-zA-Z0-9_-]+$"
+                            maxLength: 63
+                          dkimSecretRef:
+                            type: object
+                            description: "Reference to DKIM secret for this alias"
+                            properties:
+                              name:
+                                type: string
+                              namespace:
+                                type: string
+                            required:
+                              - name
+                              - namespace
+                  x-kubernetes-list-map-keys:
+                    - name
+                  x-kubernetes-list-type: map
+
+                preferredNodes:
+                  type: array
+                  description: "List of node names where this domain should preferably run"
+                  items:
+                    type: string
+                  x-kubernetes-list-type: set
+
+                suspended:
+                  type: boolean
+                  description: "If true, the domain workloads are scaled to zero"
+                  default: false
+
+                timezone:
+                  type: string
+                  description: "Timezone for the domain containers (e.g., Europe/Budapest, America/New_York)"
+                  default: "UTC"
+                  maxLength: 63
+
+                workload:
+                  type: object
+                  description: "Application workload configuration"
+                  required:
+                    - type
+                    - version
+                    - image
+                  properties:
+                    type:
+                      type: string
+                      description: "Workload type slug (php, python, nodejs, django, etc.)"
+                      maxLength: 50
+                    version:
+                      type: string
+                      description: "Version string (8.2, 3.11, 20, etc.)"
+                      maxLength: 50
+                    image:
+                      type: string
+                      description: "Full container image URL"
+                      maxLength: 500
+                    port:
+                      type: integer
+                      description: "App container port (default: 9000)"
+                      minimum: 1
+                      maximum: 65535
+                      default: 9000
+                    proxyMode:
+                      type: string
+                      description: "How nginx proxies to app (fastcgi/http/uwsgi)"
+                      enum:
+                        - fastcgi
+                        - http
+                        - uwsgi
+                      default: fastcgi
+                    command:
+                      type: array
+                      description: "Custom container command (overrides image CMD)"
+                      items:
+                        type: string
+                    args:
+                      type: array
+                      description: "Custom container args"
+                      items:
+                        type: string
+                    env:
+                      type: array
+                      description: "Environment variables for app container"
+                      items:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                            description: "Environment variable name"
+                          value:
+                            type: string
+                            description: "Environment variable value"
+                    settings:
+                      type: object
+                      description: "Type-specific runtime settings"
+                      x-kubernetes-preserve-unknown-fields: true
+                    customConfig:
+                      type: string
+                      description: "Custom config (php.ini, gunicorn.conf, etc.)"
+                      maxLength: 10000
+
+                wordpress:
+                  type: object
+                  description: "WordPress-specific settings"
+                  properties:
+                    preinstall:
+                      type: boolean
+                      description: "Pre-install WordPress on domain creation (default: false)"
+                      default: false
+
+                resources:
+                  type: object
+                  description: "Resource allocation for the domain"
+                  required:
+                    - storage
+                    - limits
+                  properties:
+                    storage:
+                      type: string
+                      description: "PVC storage size (e.g., 5Gi)"
+                      pattern: "^[0-9]+Gi$"
+
+                    requests:
+                      type: object
+                      description: "Minimum guaranteed resources (optional)"
+                      properties:
+                        cpu:
+                          type: string
+                          description: "CPU request (e.g., 50m)"
+                          pattern: "^[0-9]+m$"
+                        memory:
+                          type: string
+                          description: "Memory request (e.g., 64Mi)"
+                          pattern: "^[0-9]+Mi$"
+
+                    limits:
+                      type: object
+                      description: "Maximum resource limits"
+                      required:
+                        - cpu
+                        - memory
+                      properties:
+                        cpu:
+                          type: string
+                          description: "CPU limit (e.g., 500m)"
+                          pattern: "^[0-9]+m$"
+                        memory:
+                          type: string
+                          description: "Memory limit (e.g., 256Mi)"
+                          pattern: "^[0-9]+Mi$"
+
+                webserver:
+                  type: object
+                  description: "Nginx configuration (optional)"
+                  properties:
+                    documentRoot:
+                      type: string
+                      description: "Document root (default: /var/www/html)"
+                      pattern: "^[a-zA-Z0-9/_-]+$"
+                      maxLength: 255
+                    clientMaxBodySize:
+                      type: string
+                      description: "Maximum upload size (default: 64m)"
+                      pattern: "^[0-9]+[mMgG]$"
+                    sslRedirect:
+                      type: boolean
+                      description: "Redirect HTTP to HTTPS (default: true)"
+                    wwwRedirect:
+                      type: string
+                      description: "Redirect www to non-www or vice versa"
+                      enum:
+                        - "none"
+                        - "www-to-root"
+                        - "root-to-www"
+                    customConfig:
+                      type: string
+                      description: "Custom nginx directives"
+                      maxLength: 10000
+                    cache:
+                      type: object
+                      description: "FastCGI cache configuration"
+                      properties:
+                        enabled:
+                          type: boolean
+                          description: "Enable FastCGI caching (default: false)"
+                        size:
+                          type: string
+                          description: "Maximum cache size (default: 512Mi)"
+                          pattern: "^[0-9]+(Mi|Gi)$"
+                        inactiveTime:
+                          type: string
+                          description: "Remove cached items not accessed within this time (default: 60m)"
+                          pattern: "^[0-9]+(m|h|d)$"
+                        validTime:
+                          type: string
+                          description: "Cache validity duration for 200/301/302 responses (default: 10m)"
+                          pattern: "^[0-9]+(m|h|d)$"
+                        bypassUris:
+                          type: array
+                          description: "Additional URI patterns to bypass cache"
+                          items:
+                            type: string
+                            maxLength: 255
+
+                database:
+                  type: object
+                  description: "MariaDB database configuration"
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: "Create a database for this domain (default: true)"
+
+                email:
+                  type: object
+                  description: "Email configuration"
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: "Enable email for this domain (default: false)"
+                    dkimSelector:
+                      type: string
+                      description: "DKIM selector (default: default)"
+                      pattern: "^[a-zA-Z0-9_-]+$"
+                      maxLength: 63
+                    dkimSecretRef:
+                      type: object
+                      description: "Reference to DKIM secret created by Django"
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required: [name, namespace]
+
+                dns:
+                  type: object
+                  description: "DNS configuration for Cloudflare"
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: "Enable DNS management for this domain"
+                      default: false
+                    credentialSecretRef:
+                      type: object
+                      description: "Reference to Cloudflare API token secret"
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required: [name, namespace]
+                    zone:
+                      type: object
+                      description: "DNS zone configuration"
+                      properties:
+                        name:
+                          type: string
+                          description: "Zone name (usually same as domain name)"
+                          maxLength: 253
+                        create:
+                          type: boolean
+                          description: "Create zone if not exists"
+                          default: true
+                    autoCreateRecords:
+                      type: boolean
+                      description: "Auto-create standard DNS records (A, MX, SPF, DKIM, DMARC)"
+                      default: true
+                    records:
+                      type: array
+                      description: "DNS records to create/manage"
+                      items:
+                        type: object
+                        required: [type, name, content]
+                        properties:
+                          type:
+                            type: string
+                            enum: ["A", "AAAA", "CNAME", "TXT", "MX", "NS", "SRV"]
+                          name:
+                            type: string
+                            description: "Record name (@ for root)"
+                            maxLength: 253
+                          content:
+                            type: string
+                            description: "Record content/value"
+                            maxLength: 4096
+                          ttl:
+                            type: integer
+                            description: "TTL in seconds (1 = auto)"
+                            default: 1
+                          proxied:
+                            type: boolean
+                            description: "Enable Cloudflare proxy"
+                            default: false
+                          priority:
+                            type: integer
+                            description: "Priority for MX/SRV records"
+                          recordId:
+                            type: string
+                            description: "Cloudflare record ID (used for updates, copied from status)"
+
+                sftp:
+                  type: object
+                  description: "SFTP access configuration"
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: "Enable SFTP access (default: true)"
+                    type:
+                      type: string
+                      description: "SFTP container type: standard (SFTP only) or sshgit (SSH + Git)"
+                      enum: ["standard", "sshgit"]
+                      default: "standard"
+
+                redis:
+                  type: object
+                  description: "Redis sidecar configuration"
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: "Enable Redis sidecar container"
+                      default: false
+
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase of the domain"
+                  enum:
+                    - Pending
+                    - Provisioning
+                    - Ready
+                    - Degraded
+                    - Suspended
+                    - Failed
+                    - Terminating
+                message:
+                  type: string
+                  description: "Human-readable status message"
+                namespace:
+                  type: string
+                  description: "Namespace created for this domain"
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: "Last observed generation of the spec"
+                sftp:
+                  type: object
+                  properties:
+                    host:
+                      type: string
+                    port:
+                      type: integer
+                      minimum: 30000
+                      maximum: 32767
+                    username:
+                      type: string
+                    passwordSecretRef:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        key:
+                          type: string
+                      required: [name, namespace, key]
+                    publicKeySecretRef:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        key:
+                          type: string
+                      required: [name, namespace, key]
+                database:
+                  type: object
+                  properties:
+                    host:
+                      type: string
+                    port:
+                      type: integer
+                    name:
+                      type: string
+                    username:
+                      type: string
+                    passwordSecretRef:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        key:
+                          type: string
+                      required: [name, namespace, key]
+                email:
+                  type: object
+                  properties:
+                    dkimSelector:
+                      type: string
+                    dkimPublicKey:
+                      type: string
+                    dkimPrivateKeySecretRef:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        key:
+                          type: string
+                      required: [name, namespace, key]
+                    dkimDnsRecord:
+                      type: string
+                dns:
+                  type: object
+                  description: "DNS management status"
+                  properties:
+                    phase:
+                      type: string
+                      description: "Current phase of DNS management"
+                      enum:
+                        - Pending
+                        - Provisioning
+                        - Ready
+                        - Failed
+                    message:
+                      type: string
+                      description: "Human-readable status message"
+                      maxLength: 1024
+                    zone:
+                      type: object
+                      description: "Zone information"
+                      properties:
+                        id:
+                          type: string
+                          description: "Cloudflare zone ID"
+                        name:
+                          type: string
+                          description: "Zone name"
+                    records:
+                      type: array
+                      description: "Status of managed DNS records"
+                      items:
+                        type: object
+                        properties:
+                          type:
+                            type: string
+                          name:
+                            type: string
+                          content:
+                            type: string
+                          recordId:
+                            type: string
+                            description: "Cloudflare record ID"
+                          status:
+                            type: string
+                            enum: [Pending, Ready, Failed]
+                          error:
+                            type: string
+                            description: "Error message if failed"
+                endpoints:
+                  type: object
+                  properties:
+                    http:
+                      type: string
+                    https:
+                      type: string
+                    phpMyAdmin:
+                      type: string
+                conditions:
+                  type: array
+                  description: "Detailed status conditions"
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime]
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - NamespaceReady
+                          - PVCReady
+                          - ConfigMapReady
+                          - DeploymentReady
+                          - ServiceReady
+                          - SFTPServiceReady
+                          - IngressReady
+                          - CertificateReady
+                          - DatabaseReady
+                          - DatabaseProvisioned
+                          - SFTPReady
+                          - DKIMReady
+                          - BackupPVCReady
+                          - DNSReady
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                        maxLength: 256
+                      message:
+                        type: string
+                        maxLength: 1024
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+---
+# =============================================================================
+# DNSZone CRD - Manages DNS zones in Cloudflare
+# =============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: dnszones.kubepanel.io
+  annotations:
+    kubepanel.io/version: "v1alpha1"
+    kubepanel.io/description: "DNS zone resource for KubePanel Cloudflare DNS management"
+spec:
+  group: kubepanel.io
+  names:
+    kind: DNSZone
+    listKind: DNSZoneList
+    plural: dnszones
+    singular: dnszone
+    shortNames:
+      - dz
+  scope: Cluster  # Cluster-scoped, same as Domain CR
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Zone
+          type: string
+          jsonPath: .spec.zoneName
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Records
+          type: integer
+          jsonPath: .status.recordCount
+        - name: Last Sync
+          type: string
+          jsonPath: .status.lastSyncedAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - zoneName
+                - credentialSecretRef
+              properties:
+                zoneName:
+                  type: string
+                  description: "DNS zone name (e.g., example.com)"
+                  maxLength: 253
+
+                credentialSecretRef:
+                  type: object
+                  description: "Reference to Cloudflare API token secret"
+                  required: [name, namespace]
+                  properties:
+                    name:
+                      type: string
+                      description: "Secret name containing Cloudflare API token"
+                    namespace:
+                      type: string
+                      description: "Namespace of the secret"
+
+                records:
+                  type: array
+                  description: "DNS records to manage - ALL records including auto-generated ones"
+                  items:
+                    type: object
+                    required: [type, name, content]
+                    properties:
+                      type:
+                        type: string
+                        description: "DNS record type"
+                        enum: ["A", "AAAA", "CNAME", "TXT", "MX", "NS", "SRV", "CAA"]
+                      name:
+                        type: string
+                        description: "Record name (@ for root, or subdomain)"
+                        maxLength: 253
+                      content:
+                        type: string
+                        description: "Record content/value"
+                        maxLength: 4096
+                      ttl:
+                        type: integer
+                        description: "TTL in seconds (1 = auto)"
+                        default: 1
+                        minimum: 1
+                      proxied:
+                        type: boolean
+                        description: "Enable Cloudflare proxy (only for A/AAAA/CNAME)"
+                        default: false
+                      priority:
+                        type: integer
+                        description: "Priority for MX/SRV records"
+                        minimum: 0
+                        maximum: 65535
+                      recordId:
+                        type: string
+                        description: "Cloudflare record ID - written by operator after creation"
+                        maxLength: 64
+
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase of DNS zone management"
+                  enum:
+                    - Pending
+                    - Syncing
+                    - Ready
+                    - Failed
+                message:
+                  type: string
+                  description: "Human-readable status message"
+                  maxLength: 1024
+                zoneId:
+                  type: string
+                  description: "Cloudflare zone ID"
+                  maxLength: 64
+                recordCount:
+                  type: integer
+                  description: "Number of synced records"
+                records:
+                  type: array
+                  description: "Mirror of synced records (for status display)"
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      name:
+                        type: string
+                      content:
+                        type: string
+                      recordId:
+                        type: string
+                      synced:
+                        type: boolean
+                        description: "True if successfully synced to Cloudflare"
+                      error:
+                        type: string
+                        description: "Error message if sync failed"
+                nameservers:
+                  type: array
+                  description: "Authoritative nameservers for the zone (from CloudFlare)"
+                  items:
+                    type: string
+                lastSyncedAt:
+                  type: string
+                  format: date-time
+                  description: "Timestamp of last successful sync"
+---
+# =============================================================================
+# GlobalWAF CRD - Web Application Firewall rules on ingress-nginx
+# =============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: globalwafs.kubepanel.io
+  annotations:
+    kubepanel.io/version: "v1alpha1"
+    kubepanel.io/description: "Global WAF rules for KubePanel ModSecurity on ingress-nginx"
+spec:
+  group: kubepanel.io
+  names:
+    kind: GlobalWAF
+    listKind: GlobalWAFList
+    plural: globalwafs
+    singular: globalwaf
+    shortNames:
+      - gwaf
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Enabled
+          type: boolean
+          jsonPath: .spec.enabled
+        - name: Rules
+          type: integer
+          jsonPath: .status.ruleCount
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Last Sync
+          type: string
+          jsonPath: .status.lastSyncedAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                  description: "Enable or disable all WAF rules"
+                  default: true
+
+                rules:
+                  type: array
+                  description: "WAF rules - each rule can specify domain, IP, path, or any combination"
+                  items:
+                    type: object
+                    required:
+                      - action
+                    properties:
+                      domain:
+                        type: string
+                        description: "Domain to apply rule to (omit for all domains)"
+                        maxLength: 253
+                      ip:
+                        type: string
+                        description: "IP address or CIDR to match"
+                        maxLength: 45
+                      path:
+                        type: string
+                        description: "URL path to match"
+                        maxLength: 1024
+                      pathMatchType:
+                        type: string
+                        description: "How to match the path"
+                        enum:
+                          - exact
+                          - prefix
+                          - regex
+                        default: prefix
+                      action:
+                        type: string
+                        description: "Action to take when rule matches"
+                        enum:
+                          - block
+                          - allow
+                      comment:
+                        type: string
+                        description: "Human-readable description of the rule"
+                        maxLength: 255
+
+                geoBlock:
+                  type: object
+                  description: "Geo-blocking configuration (Phase 2)"
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: "Enable geo-blocking"
+                      default: false
+                    blockedCountries:
+                      type: array
+                      description: "ISO 3166-1 alpha-2 country codes to block"
+                      items:
+                        type: string
+                        minLength: 2
+                        maxLength: 2
+
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase of WAF configuration"
+                  enum:
+                    - Pending
+                    - Syncing
+                    - Ready
+                    - Failed
+                    - Disabled
+                message:
+                  type: string
+                  description: "Human-readable status message"
+                  maxLength: 1024
+                ruleCount:
+                  type: integer
+                  description: "Number of active rules"
+                lastSyncedAt:
+                  type: string
+                  format: date-time
+                  description: "Timestamp of last successful sync to ConfigMap"
+---
+# =============================================================================
+# DomainWAF CRD - Per-domain Web Application Firewall rules
+# =============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: domainwafs.kubepanel.io
+  annotations:
+    kubepanel.io/version: "v1alpha1"
+    kubepanel.io/description: "Per-domain WAF rules for KubePanel ModSecurity on domain nginx"
+spec:
+  group: kubepanel.io
+  names:
+    kind: DomainWAF
+    listKind: DomainWAFList
+    plural: domainwafs
+    singular: domainwaf
+    shortNames:
+      - dwaf
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Enabled
+          type: boolean
+          jsonPath: .spec.enabled
+        - name: Rules
+          type: integer
+          jsonPath: .status.ruleCount
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Last Sync
+          type: string
+          jsonPath: .status.lastSyncedAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                  description: "Enable or disable all WAF rules for this domain"
+                  default: true
+
+                rules:
+                  type: array
+                  description: "WAF rules - each rule can specify IP, path, userAgent, or any combination"
+                  items:
+                    type: object
+                    required:
+                      - action
+                    properties:
+                      ip:
+                        type: string
+                        description: "IP address or CIDR to match"
+                        maxLength: 45
+                      path:
+                        type: string
+                        description: "URL path to match"
+                        maxLength: 1024
+                      pathMatchType:
+                        type: string
+                        description: "How to match the path"
+                        enum:
+                          - exact
+                          - prefix
+                          - regex
+                        default: prefix
+                      userAgent:
+                        type: string
+                        description: "User-Agent string to match (substring match)"
+                        maxLength: 255
+                      countries:
+                        type: array
+                        description: "ISO 3166-1 alpha-2 country codes - block only from these countries (optional)"
+                        items:
+                          type: string
+                          minLength: 2
+                          maxLength: 2
+                      action:
+                        type: string
+                        description: "Action to take when rule matches"
+                        enum:
+                          - block
+                      comment:
+                        type: string
+                        description: "Human-readable description of the rule"
+                        maxLength: 255
+
+                geoBlock:
+                  type: object
+                  description: "Geo-blocking configuration"
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: "Enable geo-blocking for this domain"
+                      default: false
+                    blockedCountries:
+                      type: array
+                      description: "ISO 3166-1 alpha-2 country codes to block"
+                      items:
+                        type: string
+                        minLength: 2
+                        maxLength: 2
+
+                protectedPaths:
+                  type: array
+                  description: "Protected paths - restrict access to sensitive URLs (login pages, admin areas)"
+                  items:
+                    type: object
+                    required:
+                      - path
+                    properties:
+                      path:
+                        type: string
+                        description: "URL path to protect (e.g., /wp-login.php, /wp-admin)"
+                        maxLength: 1024
+                      pathMatchType:
+                        type: string
+                        description: "How to match the path"
+                        enum:
+                          - exact
+                          - prefix
+                          - regex
+                        default: prefix
+                      allowedIp:
+                        type: string
+                        description: "IP address allowed to access this path"
+                        maxLength: 45
+                      allowedCountries:
+                        type: array
+                        description: "ISO 3166-1 alpha-2 country codes allowed to access this path"
+                        items:
+                          type: string
+                          minLength: 2
+                          maxLength: 2
+                      comment:
+                        type: string
+                        description: "Human-readable description of the protection rule"
+                        maxLength: 255
+
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase of WAF configuration"
+                  enum:
+                    - Pending
+                    - Syncing
+                    - Ready
+                    - Failed
+                    - Disabled
+                message:
+                  type: string
+                  description: "Human-readable status message"
+                  maxLength: 1024
+                ruleCount:
+                  type: integer
+                  description: "Number of active rules"
+                lastSyncedAt:
+                  type: string
+                  format: date-time
+                  description: "Timestamp of last successful sync to ConfigMap"
+---
+# =============================================================================
+# GlobalL3Firewall CRD - Network-level firewall using Calico GlobalNetworkPolicy
+# =============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: globall3firewalls.kubepanel.io
+  annotations:
+    kubepanel.io/version: "v1alpha1"
+    kubepanel.io/description: "Global L3 Firewall rules using Calico GlobalNetworkPolicy"
+spec:
+  group: kubepanel.io
+  names:
+    kind: GlobalL3Firewall
+    listKind: GlobalL3FirewallList
+    plural: globall3firewalls
+    singular: globall3firewall
+    shortNames:
+      - gl3f
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Enabled
+          type: boolean
+          jsonPath: .spec.enabled
+        - name: Rules
+          type: integer
+          jsonPath: .status.ruleCount
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Last Sync
+          type: string
+          jsonPath: .status.lastSyncedAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                  description: "Enable or disable L3 firewall"
+                  default: true
+                rules:
+                  type: array
+                  description: "L3 firewall rules"
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - action
+                    properties:
+                      name:
+                        type: string
+                        description: "Rule name"
+                        maxLength: 255
+                      action:
+                        type: string
+                        description: "Action: deny or allow"
+                        enum:
+                          - deny
+                          - allow
+                      source:
+                        type: object
+                        properties:
+                          nets:
+                            type: array
+                            description: "Source CIDRs to match"
+                            items:
+                              type: string
+                          notNets:
+                            type: array
+                            description: "Source CIDRs to NOT match (inverse match)"
+                            items:
+                              type: string
+                      destination:
+                        type: object
+                        properties:
+                          ports:
+                            type: array
+                            description: "Destination ports to match"
+                            items:
+                              type: integer
+                              minimum: 1
+                              maximum: 65535
+                      protocol:
+                        type: string
+                        description: "Protocol: TCP or UDP"
+                        enum:
+                          - TCP
+                          - UDP
+                        default: TCP
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase of L3 firewall configuration"
+                  enum:
+                    - Pending
+                    - Syncing
+                    - Ready
+                    - Failed
+                    - Disabled
+                message:
+                  type: string
+                  description: "Human-readable status message"
+                  maxLength: 1024
+                ruleCount:
+                  type: integer
+                  description: "Number of active rules"
+                lastSyncedAt:
+                  type: string
+                  format: date-time
+                  description: "Timestamp of last successful sync to GlobalNetworkPolicy"
+---
+# =============================================================================
+# SMTPFirewall CRD - SMTP blocking rules and rate limits
+# =============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: smtpfirewalls.kubepanel.io
+  annotations:
+    kubepanel.io/version: "v1alpha1"
+    kubepanel.io/description: "SMTP Firewall rules for blocking senders/domains/IPs and per-user rate limits"
+spec:
+  group: kubepanel.io
+  names:
+    kind: SMTPFirewall
+    listKind: SMTPFirewallList
+    plural: smtpfirewalls
+    singular: smtpfirewall
+    shortNames:
+      - smtpfw
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Senders
+          type: integer
+          jsonPath: .status.blockedSendersCount
+        - name: Domains
+          type: integer
+          jsonPath: .status.blockedDomainsCount
+        - name: IPs
+          type: integer
+          jsonPath: .status.blockedIPsCount
+        - name: Rate Limits
+          type: integer
+          jsonPath: .status.rateLimitsCount
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                blockedSenders:
+                  type: array
+                  description: "Email addresses to block (e.g., spammer@example.com)"
+                  items:
+                    type: string
+                blockedDomains:
+                  type: array
+                  description: "Domains to block (e.g., spamdomain.com)"
+                  items:
+                    type: string
+                blockedIPs:
+                  type: array
+                  description: "IP addresses to block"
+                  items:
+                    type: string
+                rateLimits:
+                  type: array
+                  description: "Per-user rate limits"
+                  items:
+                    type: object
+                    required:
+                      - user
+                      - rate
+                    properties:
+                      user:
+                        type: string
+                        description: "User email address"
+                      rate:
+                        type: string
+                        description: "Rate limit (e.g., '50 / 1h')"
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase"
+                  enum:
+                    - Pending
+                    - Syncing
+                    - Active
+                    - Failed
+                message:
+                  type: string
+                  description: "Human-readable status message"
+                blockedSendersCount:
+                  type: integer
+                  description: "Number of blocked senders"
+                blockedDomainsCount:
+                  type: integer
+                  description: "Number of blocked domains"
+                blockedIPsCount:
+                  type: integer
+                  description: "Number of blocked IPs"
+                rateLimitsCount:
+                  type: integer
+                  description: "Number of custom rate limits"
+                lastSyncedAt:
+                  type: string
+                  format: date-time
+                  description: "Timestamp of last successful sync"
+---
+# =============================================================================
+# License CRD - Manages KubePanel license validation and phone-home
+# =============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: licenses.kubepanel.io
+  annotations:
+    kubepanel.io/version: "v1alpha1"
+    kubepanel.io/description: "License resource for KubePanel licensing and usage tracking"
+spec:
+  group: kubepanel.io
+  names:
+    kind: License
+    listKind: LicenseList
+    plural: licenses
+    singular: license
+    shortNames:
+      - lic
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Tier
+          type: string
+          jsonPath: .status.tier
+        - name: Valid
+          type: boolean
+          jsonPath: .status.valid
+        - name: Domains
+          type: string
+          jsonPath: .status.domainsUsed
+        - name: MaxDomains
+          type: integer
+          jsonPath: .status.maxDomains
+        - name: Expires
+          type: string
+          jsonPath: .status.expiresAt
+        - name: LastPhoneHome
+          type: string
+          jsonPath: .status.lastPhoneHome
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              properties:
+                licenseKey:
+                  type: string
+                  description: "Signed license key (base64-encoded payload.signature)"
+            status:
+              type: object
+              properties:
+                valid:
+                  type: boolean
+                  description: "Whether the license is currently valid"
+                tier:
+                  type: string
+                  description: "License tier"
+                  enum:
+                    - community
+                    - pro
+                    - premium
+                    - enterprise
+                customerName:
+                  type: string
+                  description: "Customer name from license"
+                customerId:
+                  type: string
+                  description: "Customer ID from license"
+                maxDomains:
+                  type: integer
+                  description: "Maximum allowed domains (-1 for unlimited)"
+                domainsUsed:
+                  type: integer
+                  description: "Current domain count"
+                expiresAt:
+                  type: string
+                  format: date-time
+                  description: "License expiration timestamp"
+                lastPhoneHome:
+                  type: string
+                  format: date-time
+                  description: "Last successful phone-home timestamp"
+                phoneHomeFailures:
+                  type: integer
+                  description: "Consecutive phone-home failure count"
+                gracePeriodEndsAt:
+                  type: string
+                  format: date-time
+                  description: "Grace period end timestamp (if in grace period)"
+                message:
+                  type: string
+                  description: "Human-readable status message"
+                features:
+                  type: array
+                  items:
+                    type: string
+                  description: "Enabled features for this license"
+---
+# =============================================================================
+# Backup ServiceAccount and RBAC
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubepanel-backup
+  namespace: kubepanel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubepanel-backup
+rules:
+  # Permissions to manage VolumeSnapshots
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Permissions to update Backup CR status
+  - apiGroups: ["kubepanel.io"]
+    resources: ["backups"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kubepanel.io"]
+    resources: ["backups/status"]
+    verbs: ["get", "patch", "update"]
+  # Permissions to read secrets (for MariaDB credentials)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  # Permissions to read PVCs (for backup operations)
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubepanel-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubepanel-backup
+subjects:
+  - kind: ServiceAccount
+    name: kubepanel-backup
+    namespace: kubepanel
+---
+# =============================================================================
+# Nightly Backup CronJob and RBAC
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubepanel-nightly-backup
+  namespace: kubepanel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubepanel-nightly-backup
+rules:
+  # Permissions to list Domain CRs
+  - apiGroups: ["kubepanel.io"]
+    resources: ["domains"]
+    verbs: ["get", "list"]
+  # Permissions to manage Backup CRs (create for nightly, delete for cleanup)
+  - apiGroups: ["kubepanel.io"]
+    resources: ["backups"]
+    verbs: ["create", "get", "list", "delete"]
+  # Permissions to list namespaces (for cleanup job)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubepanel-nightly-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubepanel-nightly-backup
+subjects:
+  - kind: ServiceAccount
+    name: kubepanel-nightly-backup
+    namespace: kubepanel
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kubepanel-nightly-backup
+  namespace: kubepanel
+  labels:
+    app.kubernetes.io/name: kubepanel-nightly-backup
+    app.kubernetes.io/component: backup
+    app.kubernetes.io/managed-by: kubepanel
+spec:
+  schedule: "0 2 * * *"  # Run at 2:00 AM every day
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid  # Don't start new job if previous is still running
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 86400  # Clean up after 24 hours
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: kubepanel-nightly-backup
+            app.kubernetes.io/component: backup
+        spec:
+          serviceAccountName: kubepanel-nightly-backup
+          restartPolicy: Never
+          containers:
+            - name: nightly-backup
+              image: docker.io/kubepanel/backup:v1.0
+              imagePullPolicy: Always
+              command: ["/nightly-backup.sh"]
+              env:
+                - name: BACKUP_DELAY
+                  value: "60"  # 60 seconds between each domain backup
+---
+# Cleanup CronJob - runs daily to delete expired backups
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kubepanel-backup-cleanup
+  namespace: kubepanel
+  labels:
+    app.kubernetes.io/name: kubepanel-backup-cleanup
+    app.kubernetes.io/component: backup
+    app.kubernetes.io/managed-by: kubepanel
+spec:
+  schedule: "0 4 * * *"  # Run at 4:00 AM every day (after nightly backups complete)
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: kubepanel-backup-cleanup
+            app.kubernetes.io/component: backup
+        spec:
+          serviceAccountName: kubepanel-nightly-backup  # Reuse same SA
+          restartPolicy: Never
+          containers:
+            - name: cleanup
+              image: docker.io/kubepanel/backup:v1.0
+              imagePullPolicy: Always
+              command: ["/cleanup.sh"]
+---
+# =============================================================================
+# KubePanel Operator - manages Domain CRs
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubepanel-operator
+  namespace: kubepanel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubepanel-operator
+rules:
+  # Domain CRs - full control
+  - apiGroups: ["kubepanel.io"]
+    resources: ["domains", "domains/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # DNSZone CRs - full control (including spec patching for recordId)
+  - apiGroups: ["kubepanel.io"]
+    resources: ["dnszones", "dnszones/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # GlobalWAF CRs - full control
+  - apiGroups: ["kubepanel.io"]
+    resources: ["globalwafs", "globalwafs/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # GlobalL3Firewall CRs - full control
+  - apiGroups: ["kubepanel.io"]
+    resources: ["globall3firewalls", "globall3firewalls/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # SMTPFirewall CRs - full control
+  - apiGroups: ["kubepanel.io"]
+    resources: ["smtpfirewalls", "smtpfirewalls/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Calico GlobalNetworkPolicy - for L3 firewall
+  - apiGroups: ["crd.projectcalico.org"]
+    resources: ["globalnetworkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Backup CRs - full control
+  - apiGroups: ["kubepanel.io"]
+    resources: ["backups", "backups/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Namespaces - create/delete for domains
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Core resources in domain namespaces
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Ingress
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # VolumeSnapshots for backups
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Jobs for backup/restore
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # ServiceAccounts and RBAC in domain namespaces
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events for logging
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Pods for status checking
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubepanel-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubepanel-operator
+subjects:
+  - kind: ServiceAccount
+    name: kubepanel-operator
+    namespace: kubepanel
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubepanel-operator
+  namespace: kubepanel
+  labels:
+    app.kubernetes.io/name: kubepanel-operator
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/managed-by: kubepanel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubepanel-operator
+  template:
+    metadata:
+      labels:
+        app: kubepanel-operator
+        app.kubernetes.io/name: kubepanel-operator
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: kubepanel-operator
+      containers:
+        - name: operator
+          image: docker.io/kubepanel/operator:v1.0
+          imagePullPolicy: Always
+          env:
+            - name: MARIADB_HOST
+              value: "mariadb.kubepanel.svc.cluster.local"
+            - name: MARIADB_PORT
+              value: "3306"
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-auth
+                  key: password
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: piraeus.io/v1
+kind: LinstorCluster
+metadata:
+  name: linstorcluster
+spec: {}
+---
+apiVersion: piraeus.io/v1
+kind: LinstorCluster
+metadata:
+  name: linstorcluster
+spec:
+  patches:
+    - target:
+        name: linstor-csi-node
+        kind: DaemonSet
+      patch: |
+        apiVersion: apps/v1
+        kind: DaemonSet
+        metadata:
+          name: linstor-csi-node
+        spec:
+          template:
+            spec:
+              containers:
+              - name: linstor-csi
+                volumeMounts:
+                - mountPath: /var/lib/kubelet
+                  name: publish-dir
+                  $patch: delete
+                - mountPath: /var/snap/microk8s/common/var/lib/kubelet
+                  name: publish-dir
+                  mountPropagation: Bidirectional
+---
+apiVersion: piraeus.io/v1
+kind: LinstorSatelliteConfiguration
+metadata:
+  name: storage-pool
+spec:
+# DRBD fix not needed since v9.2.14
+#  podTemplate:
+#    spec:
+#      initContainers:
+#      - name: drbd-module-loader
+#        image: docker.io/laszlokulcsar/drbd9-noble:v9.2.13fix
+  storagePools:
+    - name: pool1
+      lvmThinPool:
+        thinPool: linstorlv
+        volumeGroup: linstorvg
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: linstor-sc
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: linstor.csi.linbit.com
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  linstor.csi.linbit.com/storagePool: pool1
+  csi.storage.k8s.io/fstype: xfs
+  linstor.csi.linbit.com/placementCount: "2"
+---
+# =============================================================================
+# KubePanel Dashboard ServiceAccount and RBAC
+# =============================================================================
+# Used by kubepanel deployment and metrics CronJobs
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubepanel
+  namespace: kubepanel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubepanel-dashboard
+rules:
+  # Domain CRs - read/write for dashboard
+  - apiGroups: ["kubepanel.io"]
+    resources: ["domains", "domains/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # DNSZone CRs
+  - apiGroups: ["kubepanel.io"]
+    resources: ["dnszones", "dnszones/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # GlobalWAF CRs
+  - apiGroups: ["kubepanel.io"]
+    resources: ["globalwafs", "globalwafs/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # GlobalL3Firewall CRs
+  - apiGroups: ["kubepanel.io"]
+    resources: ["globall3firewalls", "globall3firewalls/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # SMTPFirewall CRs
+  - apiGroups: ["kubepanel.io"]
+    resources: ["smtpfirewalls", "smtpfirewalls/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pods - for status checking and log reading
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Secrets - for reading domain credentials
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  # Namespaces - for listing domain namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  # VolumeSnapshots - for backup listing
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list", "watch"]
+  # Nodes - for node management views
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Nodes/drain - for draining nodes (eviction)
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  # Metrics API - for CPU/memory metrics collection
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubepanel-dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubepanel-dashboard
+subjects:
+  - kind: ServiceAccount
+    name: kubepanel
+    namespace: kubepanel
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kubepanel
+  namespace: kubepanel
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: linstor-sc  # This must match the PV's storageClassName
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubepanel
+  namespace: kubepanel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubepanel
+  template:
+    metadata:
+      labels:
+        app: kubepanel
+      annotations:
+        # Use reserved IP pool for trusted SMTP access (permit_mynetworks)
+        cni.projectcalico.org/ipv4pools: '["kubepanel-dashboard-pool"]'
+    spec:
+      serviceAccountName: kubepanel
+      # Pod affinity for zero-downtime rolling updates with RWO PVC
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: kubepanel
+                topologyKey: kubernetes.io/hostname
+      volumes:
+      - name: kubepanel
+        persistentVolumeClaim:
+          claimName: kubepanel
+      initContainers:
+      - name: wait-for-mariadb
+        image: busybox:1.36
+        command:
+          - sh
+          - -c
+          - |
+            echo "Waiting for MariaDB to be ready...";
+            until nc -z mariadb.kubepanel.svc.cluster.local 3306; do
+              echo "MariaDB not ready, sleeping...";
+              sleep 2;
+            done
+            echo "MariaDB is up!"
+      - name: init
+        image: docker.io/kubepanel/kubepanel_init:v1.0
+        env:
+        - name: DJANGO_SUPERUSER_EMAIL
+          value: "<DJANGO_SUPERUSER_EMAIL>"
+        - name: DJANGO_SUPERUSER_USERNAME
+          value: "<DJANGO_SUPERUSER_USERNAME>"
+        - name: DJANGO_SUPERUSER_PASSWORD
+          value: "<DJANGO_SUPERUSER_PASSWORD>"
+        - name: KUBEPANEL_DOMAIN
+          value: "<KUBEPANEL_DOMAIN>"
+        - name: KUBEPANEL_VERSION
+          value: "v1.0.0"
+        - name: DBNAME
+          value: "kubepanel"
+        - name: MARIADB_ROOT_PASSWORD
+          value: "<MARIADB_ROOT_PASSWORD>"
+        - name: DBNAME_RC
+          value: "roundcube"
+        - name: MARIADB_ROOT_PASSWORD_RC
+          value: "<MARIADB_ROOT_PASSWORD_RC>"
+        imagePullPolicy: Always
+        volumeMounts:
+        - name: kubepanel
+          mountPath: /kubepanel
+      containers:
+      - name: dashboard
+        image: docker.io/kubepanel/dashboard:v1.0
+        imagePullPolicy: Always
+        env:
+        - name: DJANGO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: kubepanel-secrets
+              key: django-secret-key
+        - name: KUBEPANEL_ALERT_EMAIL
+          value: "<KUBEPANEL_ALERT_EMAIL>"
+        ports:
+        - containerPort: 8000
+        livenessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        volumeMounts:
+        - name: kubepanel
+          mountPath: /kubepanel
+      # Metrics collector sidecar - collects CPU/memory/HTTP metrics every 5 minutes
+      - name: metrics-collector
+        image: docker.io/kubepanel/dashboard:v1.0
+        imagePullPolicy: Always
+        command: ["python", "/kubepanel/manage.py", "metrics_collector"]
+        volumeMounts:
+        - name: kubepanel
+          mountPath: /kubepanel
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      # Health collector sidecar - checks Linstor, mail queue, MariaDB every 5 minutes
+      - name: health-collector
+        image: docker.io/kubepanel/dashboard:v1.0
+        imagePullPolicy: Always
+        command:
+        - sh
+        - -c
+        - |
+          while true; do
+            python /kubepanel/manage.py collect_health
+            sleep 300
+          done
+        env:
+        - name: KUBEPANEL_ALERT_EMAIL
+          value: "<KUBEPANEL_ALERT_EMAIL>"
+        volumeMounts:
+        - name: kubepanel
+          mountPath: /kubepanel
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubepanel
+  namespace: kubepanel
+spec:
+  type: ClusterIP
+  selector:
+    app: kubepanel
+  ports:
+  - name: django
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress
+  namespace: kubepanel
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: public
+  tls:
+  - hosts:
+    - <KUBEPANEL_DOMAIN>
+    secretName: kubepanel-cert
+  rules:
+  - host: "<KUBEPANEL_DOMAIN>"
+    http:
+      paths:
+      - pathType: Prefix
+        path: "/"
+        backend:
+          service:
+            name: kubepanel
+            port:
+              number: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opendkim
+  namespace: kubepanel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opendkim
+  template:
+    metadata:
+      labels:
+        app: opendkim
+    spec:
+      securityContext:
+        fsGroup: 999  # opendkim group GID
+      initContainers:
+      # Copy keys from K8s secret to emptyDir with correct permissions
+      # OpenDKIM requires keys directory to not be world-readable
+      - name: fix-permissions
+        image: busybox:1.36
+        command:
+        - sh
+        - -c
+        - |
+          mkdir -p /etc/opendkim/keys
+          chmod 700 /etc/opendkim/keys
+          for f in /secrets/*; do
+            if [ -f "$f" ]; then
+              cp "$f" /etc/opendkim/keys/
+              chmod 600 /etc/opendkim/keys/$(basename "$f")
+            fi
+          done
+          chown -R 999:999 /etc/opendkim/keys
+          echo "DKIM keys prepared: $(ls -la /etc/opendkim/keys)"
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+        - name: dkim-keys-secret
+          mountPath: /secrets
+          readOnly: true
+        - name: dkim-keys-dir
+          mountPath: /etc/opendkim/keys
+      containers:
+      - name: opendkim
+        image: docker.io/kubepanel/opendkim:v1.0
+        imagePullPolicy: Always
+        volumeMounts:
+        - name: dkim-keytable
+          mountPath: "/etc/opendkim/KeyTable"
+          subPath: "KeyTable"
+        - name: dkim-signingtable
+          mountPath: "/etc/opendkim/SigningTable"
+          subPath: "SigningTable"
+        - name: dkim-keys-dir
+          mountPath: "/etc/opendkim/keys"
+          readOnly: true
+        ports:
+        - containerPort: 8891
+        livenessProbe:
+          tcpSocket:
+            port: 8891
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 8891
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: dkim-keytable
+        configMap:
+          name: dkim-keytable
+      - name: dkim-signingtable
+        configMap:
+          name: dkim-signingtable
+      - name: dkim-keys-secret
+        secret:
+          secretName: dkim-keys
+          defaultMode: 0400
+      - name: dkim-keys-dir
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dkim-keys
+  namespace: kubepanel
+  labels:
+    app.kubernetes.io/managed-by: kubepanel-operator
+    app.kubernetes.io/component: dkim
+type: Opaque
+data: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dkim-keytable
+  namespace: kubepanel
+data:
+  KeyTable: ""
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dkim-signingtable
+  namespace: kubepanel
+data:
+  SigningTable: ""
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opendkim
+  namespace: kubepanel
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: opendkim
+    port: 8891
+    protocol: TCP
+    targetPort: 8891
+  selector:
+    app: opendkim
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    # You must replace this email address with your own.
+    # Let's Encrypt will use this to contact you about expiring
+    # certificates, and issues related to your account.
+    email: <DJANGO_SUPERUSER_EMAIL>
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      # Secret resource that will be used to store the account's private key.
+      name: letsencrypt-account-key
+    # Add a single challenge solver, HTTP01 using nginx
+    solvers:
+    - http01:
+        ingress:
+          ingressClassName: public
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smtp
+  namespace: kubepanel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: smtp
+  template:
+    metadata:
+      labels:
+        app: smtp
+    spec:
+      affinity:
+        # Pod affinity for zero-downtime rolling updates with RWO PVC
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: smtp
+                topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - preference:
+              matchExpressions:
+              - key: mx0
+                operator: In
+                values:
+                - "true"
+            weight: 1
+      containers:
+       - name: smtp
+         image: docker.io/kubepanel/smtp:v1.0
+         imagePullPolicy: Always
+         ports:
+         - containerPort: 25
+         env:
+         - name: MARIADB_ROOT_PASSWORD
+           value: "<MARIADB_ROOT_PASSWORD>"
+         volumeMounts:
+         - name: mail-tls
+           mountPath: /etc/ssl/kubepanel
+           readOnly: true
+         - mountPath: /var/spool/postfix
+           name: postfix-queue
+         - mountPath: /var/mail/vmail
+           name: smtp-data
+         - name: smtp-conf
+           mountPath: /etc/postfix/main.cf
+           subPath: main.cf
+         - name: smtp-conf
+           mountPath: /etc/postfix/mysql-virtual-alias-maps.cf
+           subPath: mysql-virtual-alias-maps.cf
+         - name: smtp-conf
+           mountPath: /etc/postfix/mysql-virtual-mailbox-domains.cf
+           subPath: mysql-virtual-mailbox-domains.cf
+         - name: smtp-conf
+           mountPath: /etc/postfix/mysql-virtual-mailbox-maps.cf
+           subPath: mysql-virtual-mailbox-maps.cf
+         - name: smtp-conf
+           mountPath: /etc/dovecot/dovecot-sql.conf.ext
+           subPath: dovecot-sql.conf.ext
+         - name: smtp-conf
+           mountPath: /etc/dovecot/conf.d/10-mail.conf
+           subPath: 10-mail.conf
+         livenessProbe:
+           tcpSocket:
+             port: 25
+           initialDelaySeconds: 30
+           periodSeconds: 30
+           timeoutSeconds: 5
+           failureThreshold: 3
+         readinessProbe:
+           tcpSocket:
+             port: 25
+           initialDelaySeconds: 10
+           periodSeconds: 10
+           timeoutSeconds: 5
+           failureThreshold: 3
+      volumes:
+      - name: smtp-data
+        persistentVolumeClaim:
+          claimName: smtp-pvc
+      - name: postfix-queue
+        persistentVolumeClaim:
+          claimName: postfix-queue-pvc
+      - configMap:
+          name: smtp-conf
+        name: smtp-conf
+      - name: mail-tls
+        secret:
+          secretName: kubepanel-cert
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: smtp-internal-conf
+  namespace: kubepanel
+data:
+  main.cf: |
+    # Simple SMTP relay for system emails (no MySQL dependencies)
+    smtpd_banner = $myhostname ESMTP
+    biff = no
+    append_dot_mydomain = no
+    compatibility_level = 3.6
+
+    # Only allow kubepanel-pool pods to send
+    mynetworks = 127.0.0.0/8 10.100.0.0/24
+
+    # Relay restrictions - only mynetworks can relay
+    smtpd_relay_restrictions = permit_mynetworks reject
+    smtpd_recipient_restrictions = permit_mynetworks reject
+
+    # Basic settings
+    myhostname = smtp-internal.kubepanel.svc.cluster.local
+    mydomain = kubepanel.svc.cluster.local
+    myorigin = $mydomain
+    mydestination =
+    relayhost =
+
+    inet_interfaces = all
+    inet_protocols = ipv4
+
+    # Disable all virtual/local delivery - relay only
+    local_recipient_maps =
+    local_transport = error:no local delivery
+
+    # Logging
+    maillog_file = /dev/stdout
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smtp-internal
+  namespace: kubepanel
+  labels:
+    app.kubernetes.io/name: smtp-internal
+    app.kubernetes.io/component: system-mailer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: smtp-internal
+  template:
+    metadata:
+      labels:
+        app: smtp-internal
+    spec:
+      containers:
+      - name: postfix
+        image: docker.io/kubepanel/smtp:v1.0
+        ports:
+        - containerPort: 25
+        env:
+        - name: ALLOWED_SENDER_DOMAINS
+          value: ""
+        - name: RELAYHOST
+          value: ""
+        volumeMounts:
+        - name: config
+          mountPath: /etc/postfix/main.cf
+          subPath: main.cf
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        livenessProbe:
+          tcpSocket:
+            port: 25
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          tcpSocket:
+            port: 25
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          defaultMode: 420
+          name: smtp-internal-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: smtp-internal
+  namespace: kubepanel
+spec:
+  clusterIP: None
+  ports:
+  - name: smtp
+    port: 25
+    protocol: TCP
+    targetPort: 25
+  selector:
+    app: smtp-internal
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: smtp
+  namespace: kubepanel
+spec:
+  externalTrafficPolicy: Local
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: smtp
+    port: 25
+    protocol: TCP
+    targetPort: 25
+  - name: imap
+    port: 993
+    protocol: TCP
+    targetPort: 993
+  - name: submission
+    port: 587
+    protocol: TCP
+    targetPort: 587
+  - name: pop3
+    port: 995
+    protocol: TCP
+    targetPort: 995
+  - name: submissions
+    port: 465
+    protocol: TCP
+    targetPort: 465
+  selector:
+    app: smtp
+  sessionAffinity: None
+  type: ClusterIP
+  externalIPs:
+  - <NODE_1_IP>
+  - <NODE_2_IP>
+  - <NODE_3_IP>
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: imap-ingress
+  namespace: ingress
+  labels:
+    name: nginx-ingress-microk8s
+spec:
+  type: ClusterIP
+  ports:
+    - name: proxied-tcp-465
+      port: 465
+      targetPort: 465
+      protocol: TCP
+    - name: proxied-tcp-995
+      port: 995
+      targetPort: 995
+      protocol: TCP
+    - name: proxied-tcp-993
+      port: 993
+      targetPort: 993
+      protocol: TCP
+    - name: proxied-tcp-587
+      port: 587
+      targetPort: 587
+      protocol: TCP
+  selector:
+    name: nginx-ingress-microk8s
+  externalIPs:
+  - <NODE_1_IP>
+  - <NODE_2_IP>
+  - <NODE_3_IP>
+---
+apiVersion: v1
+data:
+  "587": kubepanel/smtp:587
+  "993": kubepanel/smtp:993
+  "995": kubepanel/smtp:995
+  "465": kubepanel/smtp:465
+kind: ConfigMap
+metadata:
+  name: nginx-ingress-tcp-microk8s-conf
+  namespace: ingress
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mariadb
+  namespace: kubepanel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mariadb
+  template:
+    metadata:
+      labels:
+        app: mariadb
+    spec:
+      # Pod affinity for zero-downtime rolling updates with RWO PVC
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: mariadb
+                topologyKey: kubernetes.io/hostname
+      volumes:
+      - name: mariadb-data
+        persistentVolumeClaim:
+          claimName: mariadb-pvc
+      containers:
+      - name: mariadb
+        image: mariadb
+        volumeMounts:
+        - mountPath: /var/lib/mysql
+          name: mariadb-data
+        ports:
+        - containerPort: 3306
+        env:
+        - name: MARIADB_ROOT_PASSWORD
+          value: "<MARIADB_ROOT_PASSWORD>"
+        livenessProbe:
+          tcpSocket:
+            port: 3306
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 3306
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mariadb-pvc
+  namespace: kubepanel
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: linstor-sc
+  resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: smtp-pvc
+  namespace: kubepanel
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: linstor-sc
+  resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postfix-queue-pvc
+  namespace: kubepanel
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: linstor-sc
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb
+  namespace: kubepanel
+spec:
+  selector:
+    app: mariadb
+  ports:
+  - port: 3306
+    protocol: TCP
+    targetPort: 3306
+    name: mariadb
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mariadb-auth
+  namespace: kubepanel
+type: kubernetes.io/basic-auth
+stringData:
+  username: root
+  password: <MARIADB_ROOT_PASSWORD>
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubepanel-secrets
+  namespace: kubepanel
+type: Opaque
+stringData:
+  django-secret-key: <DJANGO_SECRET_KEY>
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: smtp-conf
+  namespace: kubepanel
+data:
+  main.cf: |-
+    smtpd_banner = $myhostname ESMTP $mail_name (Ubuntu)
+    biff = no
+    append_dot_mydomain = no
+    readme_directory = no
+    compatibility_level = 3.6
+    smtpd_tls_cert_file=/etc/ssl/kubepanel/tls.crt
+    smtpd_tls_key_file=/etc/ssl/kubepanel/tls.key
+    smtpd_tls_security_level=may
+    smtpd_tls_auth_only = yes
+    smtp_tls_CApath=/etc/ssl/certs
+    smtp_tls_security_level=may
+    smtp_tls_session_cache_database = btree:${data_directory}/smtp_scache
+    smtpd_relay_restrictions = permit_mynetworks permit_sasl_authenticated defer_unauth_destination
+    smtpd_recipient_restrictions = permit_mynetworks permit_sasl_authenticated reject_unauth_destination
+    myhostname = <KUBEPANEL_DOMAIN>
+    mydomain = <KUBEPANEL_DOMAIN>
+    myorigin = $mydomain
+    alias_maps = hash:/etc/aliases
+    alias_database = hash:/etc/aliases
+    mydestination = $myhostname, localhost, localhost.localdomain, , localhost
+    relayhost =
+    mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128 10.245.0.0/24
+    mailbox_size_limit = 0
+    recipient_delimiter = +
+    inet_interfaces = all
+    inet_protocols = all
+    smtpd_milters = inet:rspamd.kubepanel.svc.cluster.local:11332, inet:opendkim.kubepanel.svc.cluster.local:8891
+    non_smtpd_milters = inet:rspamd.kubepanel.svc.cluster.local:11332, inet:opendkim.kubepanel.svc.cluster.local:8891
+    milter_default_action = accept
+    milter_protocol = 6
+    maillog_file = /var/log/postfix.log
+    virtual_mailbox_domains = mysql:/etc/postfix/mysql-virtual-mailbox-domains.cf
+    virtual_mailbox_maps = mysql:/etc/postfix/mysql-virtual-mailbox-maps.cf
+    virtual_alias_maps = mysql:/etc/postfix/mysql-virtual-alias-maps.cf
+    virtual_transport = lmtp:unix:private/dovecot-lmtp
+    smtpd_sasl_type = dovecot
+    smtpd_sasl_path = private/auth
+    smtpd_sasl_auth_enable = yes
+    smtpd_sasl_security_options = noanonymous
+    smtpd_sasl_local_domain = $myhostname
+  mysql-virtual-mailbox-maps.cf: |-
+    user = kubepanel
+    password = <MARIADB_ROOT_PASSWORD>
+    hosts = mariadb.kubepanel.svc.cluster.local
+    dbname = kubepanel
+    query = SELECT CONCAT(d.domain_name, '/', mu.local_part, '/') AS maildir FROM dashboard_mailuser mu JOIN dashboard_domain d ON mu.domain_id = d.id WHERE mu.active = 1 AND mu.domain_alias_id IS NULL AND CONCAT(mu.local_part, '@', d.domain_name) = '%s' UNION SELECT CONCAT(da.alias_name, '/', mu.local_part, '/') AS maildir FROM dashboard_mailuser mu JOIN dashboard_domainalias da ON mu.domain_alias_id = da.id WHERE mu.active = 1 AND mu.domain_alias_id IS NOT NULL AND CONCAT(mu.local_part, '@', da.alias_name) = '%s'
+  mysql-virtual-alias-maps.cf: |-
+    user = kubepanel
+    password = <MARIADB_ROOT_PASSWORD>
+    hosts = mariadb.kubepanel.svc.cluster.local
+    dbname = kubepanel
+    query = SELECT dashboard_mailalias.destination
+            FROM dashboard_mailalias
+            WHERE dashboard_mailalias.active = 1
+              AND dashboard_mailalias.source = '%s'
+  mysql-virtual-mailbox-domains.cf: |-
+    user = kubepanel
+    password = <MARIADB_ROOT_PASSWORD>
+    hosts = mariadb.kubepanel.svc.cluster.local
+    dbname = kubepanel
+    query = SELECT dashboard_domain.domain_name FROM dashboard_domain WHERE dashboard_domain.domain_name='%s' UNION SELECT dashboard_domainalias.alias_name FROM dashboard_domainalias WHERE dashboard_domainalias.email_enabled = 1 AND dashboard_domainalias.alias_name='%s'
+  dovecot-sql.conf.ext: |-
+    driver = mysql
+    connect = host=mariadb.kubepanel.svc.cluster.local dbname=kubepanel user=kubepanel password=<MARIADB_ROOT_PASSWORD>
+    default_pass_scheme = SHA512-CRYPT
+    password_query = SELECT \
+        CONCAT(mu.local_part, '@', d.domain_name) AS user, \
+        mu.password AS password, \
+        '/var/mail/vmail/' AS userdb_home, \
+        'vmail' AS userdb_uid, \
+        'vmail' AS userdb_gid, \
+        CONCAT('maildir:/var/mail/vmail/', d.domain_name, '/', mu.local_part, '/') AS userdb_mail \
+    FROM dashboard_mailuser mu \
+    JOIN dashboard_domain d ON mu.domain_id = d.id \
+    WHERE mu.active = 1 AND mu.domain_alias_id IS NULL \
+      AND CONCAT(mu.local_part, '@', d.domain_name) = '%u' \
+    UNION SELECT \
+        CONCAT(mu.local_part, '@', da.alias_name) AS user, \
+        mu.password AS password, \
+        '/var/mail/vmail/' AS userdb_home, \
+        'vmail' AS userdb_uid, \
+        'vmail' AS userdb_gid, \
+        CONCAT('maildir:/var/mail/vmail/', da.alias_name, '/', mu.local_part, '/') AS userdb_mail \
+    FROM dashboard_mailuser mu \
+    JOIN dashboard_domainalias da ON mu.domain_alias_id = da.id \
+    WHERE mu.active = 1 AND mu.domain_alias_id IS NOT NULL \
+      AND CONCAT(mu.local_part, '@', da.alias_name) = '%u'
+  10-mail.conf: |-
+    mail_location = maildir:/var/mail/vmail/%d/%n
+    passdb {
+      driver = sql
+      args = /etc/dovecot/dovecot-sql.conf.ext
+    }
+    userdb {
+      driver = static
+      args = uid=vmail gid=vmail home=/var/mail/vmail/%d/%n
+    }
+    namespace inbox {
+      inbox = yes
+    }
+    mail_privileged_group = mail
+    protocol !indexer-worker {
+    }
+---
+apiVersion: v1
+data:
+  hsts: "false"
+  proxy-body-size: 100M
+  ssl-redirect: "false"
+  enable-modsecurity: "true"
+  enable-owasp-modsecurity-crs: "false"
+  log-format-upstream: '{"time": "$time_iso8601", "remote_addr": "$proxy_protocol_addr",
+    "x_forwarded_for": "$proxy_add_x_forwarded_for", "request_id": "$req_id", "remote_user":
+    "$remote_user", "bytes_sent": $bytes_sent, "request_time": $request_time, "status":
+    $status, "vhost": "$host", "request_proto": "$server_protocol", "path": "$uri",
+    "request_query": "$args", "request_length": $request_length, "duration": $request_time,"method":
+    "$request_method", "http_referrer": "$http_referer", "http_user_agent": "$http_user_agent",
+    "request_body": "$request_body" }'
+kind: ConfigMap
+metadata:
+  name: nginx-load-balancer-microk8s-conf
+  namespace: ingress
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-public-ips
+  namespace: kubepanel
+data: {}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-ip-updater
+  namespace: kubepanel
+spec:
+  selector:
+    matchLabels:
+      app: node-ip-updater
+  template:
+    metadata:
+      labels:
+        app: node-ip-updater
+    spec:
+      hostNetwork: true
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: updater
+        image: bitnami/kubectl:latest
+        command: ["/bin/sh","-c"]
+        args:
+        - |
+          # Fetch the public IP
+          IP=$(curl -s ifconfig.me)
+          NODE=$(hostname)
+          echo "Patching ConfigMap: $NODE → $IP"
+          kubectl patch configmap node-public-ips \
+            --namespace=kubepanel \
+            --type=merge \
+            --patch "{\"data\": {\"${NODE}\": \"${IP}\"}}"
+          sleep 86400
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: roundcube-pvc
+  namespace: kubepanel
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: linstor-sc
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: roundcube
+  namespace: kubepanel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: roundcube
+  template:
+    metadata:
+      labels:
+        app: roundcube
+    spec:
+      # Pod affinity for zero-downtime rolling updates with RWO PVC
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: roundcube
+                topologyKey: kubernetes.io/hostname
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: roundcube-pvc
+      containers:
+        - name: roundcube
+          image: roundcube/roundcubemail:1.6.6-apache        # upstream image
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ROUNDCUBEMAIL_DEFAULT_HOST      # IMAP host = dovecot lmtp sibling
+              value: "ssl://<KUBEPANEL_DOMAIN>"    # IMAPS = 993
+            - name: ROUNDCUBEMAIL_SMTP_SERVER       # SMTP submission port 587
+              value: "tls://<KUBEPANEL_DOMAIN>"
+            - name: ROUNDCUBEMAIL_DEFAULT_PORT
+              value: "993"
+            - name: ROUNDCUBE_DB_TYPE
+              value: "mysql"
+            - name: ROUNDCUBE_DB_HOST
+              valueFrom: { secretKeyRef: { name: roundcube-db-secret, key: DB_HOST } }
+            - name: ROUNDCUBE_DB_PORT
+              valueFrom: { secretKeyRef: { name: roundcube-db-secret, key: DB_PORT } }
+            - name: ROUNDCUBE_DB_USER
+              valueFrom: { secretKeyRef: { name: roundcube-db-secret, key: DB_USER } }
+            - name: ROUNDCUBE_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: roundcube-db-secret, key: DB_PASSWORD } }
+            - name: ROUNDCUBE_DB_NAME
+              valueFrom: { secretKeyRef: { name: roundcube-db-secret, key: DB_NAME } }
+          ports:
+            - containerPort: 80        # PHP-FPM
+          volumeMounts:
+            - name: data
+              mountPath: /var/roundcube          # temp, logs, plugins, etc.
+          livenessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: roundcube
+  namespace: kubepanel
+spec:
+  type: ClusterIP
+  selector:
+    app: roundcube
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: roundcube-db-secret
+  namespace: kubepanel
+type: Opaque
+stringData:
+  DB_USER:     roundcube                      # create this user in MariaDB
+  DB_PASSWORD: <MARIADB_ROOT_PASSWORD_RC>
+  DB_NAME:     roundcube                      # create this DB in MariaDB
+  DB_HOST:     mariadb.kubepanel.svc.cluster.local
+  DB_PORT:     "3306"
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: roundcube
+  namespace: kubepanel
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: public
+  tls:
+    - hosts: [ "webmail.<KUBEPANEL_DOMAIN>" ]
+      secretName: roundcube-cert
+  rules:
+    - host: "webmail.<KUBEPANEL_DOMAIN>"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: roundcube
+                port:
+                  number: 80
+---
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: piraeus-snapshots
+driver: linstor.csi.linbit.com
+deletionPolicy: Delete
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: phpmyadmin-deployment
+  namespace: kubepanel
+  labels:
+    app: phpmyadmin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: phpmyadmin
+  template:
+    metadata:
+      labels:
+        app: phpmyadmin
+    spec:
+      containers:
+        - name: phpmyadmin
+          image: phpmyadmin/phpmyadmin
+          ports:
+            - containerPort: 80
+          env:
+            - name: PMA_HOST
+              value: mariadb
+            - name: PMA_PORT
+              value: "3306"
+          livenessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: phpmyadmin
+  namespace: kubepanel
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 80
+  selector:
+    app: phpmyadmin
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  name: phpmyadmin
+  namespace: kubepanel
+spec:
+  ingressClassName: public
+  rules:
+  - host: "phpmyadmin.<KUBEPANEL_DOMAIN>"
+    http:
+      paths:
+      - backend:
+          service:
+            name: phpmyadmin
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  tls:
+    - hosts: [ "phpmyadmin.<KUBEPANEL_DOMAIN>" ]
+      secretName: phpmyadmin-cert
+---
+# =============================================================================
+# GeoIP Setup for Ingress-Nginx - Patches DaemonSet to add GeoIP database
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: geoip-patcher
+  namespace: kubepanel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: geoip-patcher-role
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: geoip-patcher-binding
+subjects:
+  - kind: ServiceAccount
+    name: geoip-patcher
+    namespace: kubepanel
+roleRef:
+  kind: ClusterRole
+  name: geoip-patcher-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: geoip-ingress-patcher
+  namespace: kubepanel
+  annotations:
+    kubepanel.io/description: "Patches ingress-nginx DaemonSet to add GeoIP database init container"
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      serviceAccountName: geoip-patcher
+      restartPolicy: OnFailure
+      containers:
+        - name: patcher
+          image: bitnami/kubectl:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Checking if ingress-nginx already has geoip-db volume..."
+              if kubectl get daemonset nginx-ingress-microk8s-controller -n ingress -o jsonpath='{.spec.template.spec.volumes[*].name}' | grep -q geoip-db; then
+                echo "GeoIP volume already exists, skipping patch."
+                exit 0
+              fi
+
+              echo "Patching ingress-nginx DaemonSet for GeoIP support..."
+              kubectl patch daemonset nginx-ingress-microk8s-controller -n ingress --type='strategic' -p='{
+                "spec": {
+                  "template": {
+                    "spec": {
+                      "initContainers": [{
+                        "name": "geoip-downloader",
+                        "image": "curlimages/curl:latest",
+                        "command": ["sh", "-c", "echo Downloading GeoIP database... && curl -fsSL https://raw.githubusercontent.com/kubepanel-io/kubepanel/refs/heads/main/GeoLite2-Country.mmdb -o /geoip/GeoLite2-Country.mmdb && echo Download complete."],
+                        "volumeMounts": [{"name": "geoip-db", "mountPath": "/geoip"}]
+                      }],
+                      "volumes": [{"name": "geoip-db", "emptyDir": {}}],
+                      "containers": [{
+                        "name": "nginx-ingress-microk8s",
+                        "volumeMounts": [{"name": "geoip-db", "mountPath": "/etc/ingress-controller/geoip", "readOnly": true}]
+                      }]
+                    }
+                  }
+                }
+              }'
+
+              if [ $? -eq 0 ]; then
+                echo "Patch applied successfully!"
+              else
+                echo "Patch failed!"
+                exit 1
+              fi
+---
+# =============================================================================
+# Redis - For rspamd rate limiting persistence
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: kubepanel
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: linstor-sc
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: kubepanel
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: smtp-firewall
+    app.kubernetes.io/managed-by: kubepanel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      # Pod affinity for zero-downtime rolling updates with RWO PVC
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: redis
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          args: ["--appendonly", "yes"]  # Enable AOF persistence
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: kubepanel
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+# =============================================================================
+# rspamd - SMTP rate limiting and content inspection
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rspamd-config
+  namespace: kubepanel
+data:
+  # Worker proxy configuration - milter mode
+  worker-proxy.inc: |
+    type = "rspamd_proxy";
+    bind_socket = "*:11332";
+    milter = true;
+    timeout = 120s;
+    upstream "local" {
+      default = yes;
+      self_scan = yes;
+    }
+  # Rate limiting configuration (rspamd 3.x syntax)
+  # Uses Redis for rate limit counters only (not for custom rates)
+  ratelimit.conf: |
+    enabled = true;
+    backend = "redis";
+
+    # Custom per-user rate limits from file map
+    custom_keywords = "/etc/rspamd/local.d/custom_ratelimit.lua";
+
+    rates {
+      # Per authenticated user / sender (default for users without custom limits)
+      user = {
+        selector = 'user.lower';
+        bucket = {
+          rate = "100 / 1h";
+          burst = 20;
+        };
+      };
+      # Per recipient (to detect mass mailing)
+      to = {
+        selector = 'rcpts:addr.take_n(5)';
+        bucket = {
+          rate = "200 / 1h";
+          burst = 30;
+        };
+      };
+      # Per sender address rate limit
+      from = {
+        selector = 'from:addr.lower';
+        bucket = {
+          rate = "100 / 1h";
+          burst = 20;
+        };
+      };
+    }
+  # Custom Lua script for per-user rate limits from file map
+  custom_ratelimit.lua: |
+    -- Per-user rate limit lookup from file map
+    -- Map format: user@example.com 50 / 1h
+    -- Managed by SMTPFirewall CRD
+
+    local rspamd_logger = require "rspamd_logger"
+
+    -- Load user rate limits map (hash type: key -> value)
+    local user_rates_map = rspamd_config:add_map({
+      url = '/etc/rspamd/local.d/user_ratelimits.map',
+      type = 'hash',
+      description = 'Per-user rate limits'
+    })
+
+    local custom_keywords = {}
+
+    custom_keywords.user_custom = function(task)
+      local user = task:get_user()
+      if not user then
+        local from = task:get_from('smtp')
+        if from and from[1] then
+          user = from[1].addr
+        end
+      end
+
+      if not user then
+        return nil
+      end
+
+      user = user:lower()
+
+      -- Lookup in map (synchronous - map is in memory)
+      if user_rates_map then
+        local custom_rate = user_rates_map:get_key(user)
+
+        if custom_rate then
+          local bucket_key = "rl_custom_" .. user
+          rspamd_logger.infox(task, "custom rate for %s: %s", user, custom_rate)
+          return bucket_key, custom_rate
+        end
+      end
+
+      return nil
+    end
+
+    return custom_keywords
+  # Redis backend configuration (for rate limit counters)
+  redis.conf: |
+    servers = "redis.kubepanel.svc.cluster.local:6379";
+  # Multimap module for sender/domain/IP blocking
+  # Uses file-based maps managed by SMTPFirewall CRD
+  multimap.conf: |
+    # Block specific senders (full email address)
+    BLOCKED_SENDER {
+      type = "from";
+      map = "/etc/rspamd/local.d/blocked_senders.map";
+      action = "reject";
+      message = "Sender blocked by administrator";
+    }
+
+    # Block entire domains
+    BLOCKED_DOMAIN {
+      type = "from";
+      filter = "email:domain";
+      map = "/etc/rspamd/local.d/blocked_domains.map";
+      action = "reject";
+      message = "Sender domain blocked by administrator";
+    }
+
+    # Block specific IPs
+    BLOCKED_IP {
+      type = "ip";
+      map = "/etc/rspamd/local.d/blocked_ips.map";
+      action = "reject";
+      message = "IP blocked by administrator";
+    }
+  # Map files for blocking (managed by SMTPFirewall CRD operator)
+  blocked_senders.map: |
+    # Blocked sender email addresses (one per line)
+    # Managed by SMTPFirewall CRD
+  blocked_domains.map: |
+    # Blocked sender domains (one per line)
+    # Managed by SMTPFirewall CRD
+  blocked_ips.map: |
+    # Blocked IP addresses (one per line)
+    # Managed by SMTPFirewall CRD
+  user_ratelimits.map: |
+    # Per-user rate limits (format: user@example.com 50 / 1h)
+    # Managed by SMTPFirewall CRD
+  # History logging configuration
+  history_redis.conf: |
+    servers = "redis.kubepanel.svc.cluster.local:6379";
+    key_prefix = "rs_history_global";
+    nrows = 1000;
+    compress = true;
+  # Worker controller configuration - Web UI and API
+  worker-controller.inc: |
+    bind_socket = "*:11334";
+    # Allow unauthenticated access from cluster network
+    secure_ip = "10.0.0.0/8";
+    secure_ip = "172.16.0.0/12";
+    secure_ip = "192.168.0.0/16";
+    # Also allow localhost
+    secure_ip = "127.0.0.0/8";
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rspamd-pvc
+  namespace: kubepanel
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: linstor-sc
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rspamd
+  namespace: kubepanel
+  labels:
+    app.kubernetes.io/name: rspamd
+    app.kubernetes.io/component: smtp-firewall
+    app.kubernetes.io/managed-by: kubepanel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rspamd
+  template:
+    metadata:
+      labels:
+        app: rspamd
+    spec:
+      # Pod affinity for zero-downtime rolling updates with RWO PVC
+      # Ensures new pod schedules on same node as existing pod
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: rspamd
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: rspamd
+          image: rspamd/rspamd:latest
+          ports:
+            - containerPort: 11332
+              name: milter
+            - containerPort: 11333
+              name: worker
+            - containerPort: 11334
+              name: webui
+          volumeMounts:
+            - name: config
+              mountPath: /etc/rspamd/local.d/worker-proxy.inc
+              subPath: worker-proxy.inc
+            - name: config
+              mountPath: /etc/rspamd/local.d/ratelimit.conf
+              subPath: ratelimit.conf
+            - name: config
+              mountPath: /etc/rspamd/local.d/redis.conf
+              subPath: redis.conf
+            - name: config
+              mountPath: /etc/rspamd/local.d/multimap.conf
+              subPath: multimap.conf
+            - name: config
+              mountPath: /etc/rspamd/local.d/history_redis.conf
+              subPath: history_redis.conf
+            - name: config
+              mountPath: /etc/rspamd/local.d/worker-controller.inc
+              subPath: worker-controller.inc
+            - name: config
+              mountPath: /etc/rspamd/local.d/custom_ratelimit.lua
+              subPath: custom_ratelimit.lua
+            - name: config
+              mountPath: /etc/rspamd/local.d/blocked_senders.map
+              subPath: blocked_senders.map
+            - name: config
+              mountPath: /etc/rspamd/local.d/blocked_domains.map
+              subPath: blocked_domains.map
+            - name: config
+              mountPath: /etc/rspamd/local.d/blocked_ips.map
+              subPath: blocked_ips.map
+            - name: config
+              mountPath: /etc/rspamd/local.d/user_ratelimits.map
+              subPath: user_ratelimits.map
+            - name: data
+              mountPath: /var/lib/rspamd
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            tcpSocket:
+              port: 11332
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 11332
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: rspamd-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: rspamd-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rspamd
+  namespace: kubepanel
+spec:
+  selector:
+    app: rspamd
+  ports:
+    - name: milter
+      port: 11332
+      targetPort: 11332
+    - name: worker
+      port: 11333
+      targetPort: 11333
+    - name: webui
+      port: 11334
+      targetPort: 11334
+---
+# Default License CR for community tier
+# This enables phone-home for anonymous usage statistics
+# To upgrade, add your licenseKey to spec.licenseKey
+apiVersion: kubepanel.io/v1alpha1
+kind: License
+metadata:
+  name: kubepanel-license
+spec:
+  licenseKey: ""

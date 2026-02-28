@@ -1,0 +1,15 @@
+# Use Ubuntu as the base image
+FROM kubepanel/kubepanelbase:v1.0
+
+RUN pip install redis
+RUN mkdir -p /kubepanel
+RUN mkdir -p /dkim-privkeys
+RUN mkdir -p /root/.ssh/
+RUN ssh-keyscan github.com >> /root/.ssh/known_hosts
+# Adjust permissions to allow Nginx and PHP-FPM to access the document root
+
+# Run Nginx and PHP-FPM as non-root user
+USER root
+EXPOSE 8000
+COPY dashboard_entrypoint.sh /entrypoint.sh
+ENTRYPOINT /entrypoint.sh
