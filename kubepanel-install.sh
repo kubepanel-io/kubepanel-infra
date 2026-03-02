@@ -378,7 +378,7 @@ main() {
     print_progress "Updating package repositories..."
     run_cmd sudo apt update
     print_progress "Installing dependencies (git, lvm2)..."
-    run_cmd sudo apt install git lvm2 -y
+    run_cmd sudo apt install git lvm2 linux-headers-$(uname -r) -y
     print_success "Dependencies installed"
     
     print_step "3" "MicroK8S Installation"

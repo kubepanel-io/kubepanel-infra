@@ -14,9 +14,10 @@ metadata:
   name: kubepanel-dashboard-pool
 spec:
   cidr: 10.245.0.0/24
-  ipipMode: Always
+  ipipMode: Never
   natOutgoing: true
   nodeSelector: all()
+  vxlanMode: Always
 ---
 # =============================================================================
 # Backup CRD - Manages backup records for domains
