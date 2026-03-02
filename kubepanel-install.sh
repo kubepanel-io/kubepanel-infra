@@ -231,8 +231,15 @@ replace_placeholders() {
     local node3_ip=${node_ips[2]}
 
     # Label first node for SMTP pod affinity (mx0 = primary MX endpoint)
-    local node1_name
-    node1_name=$(microk8s kubectl get nodes -o jsonpath="{.items[?(@.status.addresses[?(@.type=='InternalIP')].address=='${node1_ip}')].metadata.name}")
+    # Note: kubectl jsonpath doesn't support nested filters, so we use a loop approach
+    local node1_name=""
+    while read -r name ip; do
+      if [[ "$ip" == "$node1_ip" ]]; then
+        node1_name="$name"
+        break
+      fi
+    done < <(microk8s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}')
+
     if [[ -n "$node1_name" ]]; then
       run_cmd microk8s kubectl label node "$node1_name" mx0=true --overwrite
     fi

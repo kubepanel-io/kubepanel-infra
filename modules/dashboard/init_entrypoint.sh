@@ -180,6 +180,20 @@ else
     # Try to complete any missing steps
     cd "$DIR"
 
+    # Ensure settings.py is configured (in case previous run failed before this step)
+    if grep -q "<KUBEPANEL_DOMAIN>" "$DIR/kubepanel/settings.py" 2>/dev/null; then
+        log "Configuring settings.py (placeholders still present)..."
+        if ! sed -i "s;<KUBEPANEL_DOMAIN>;$KUBEPANEL_DOMAIN;g" "$DIR/kubepanel/settings.py"; then
+            log_error "Failed to configure KUBEPANEL_DOMAIN in settings.py"
+            exit 1
+        fi
+        if ! sed -i "s;<MARIADB_ROOT_PASSWORD>;$MARIADB_ROOT_PASSWORD;g" "$DIR/kubepanel/settings.py"; then
+            log_error "Failed to configure MARIADB_ROOT_PASSWORD in settings.py"
+            exit 1
+        fi
+        log "Settings configured successfully."
+    fi
+
     log "Running migrate to ensure database is up to date..."
     if ! /usr/local/bin/python "$DIR/manage.py" migrate --noinput 2>&1 | tee -a "$INIT_LOG"; then
         log_error "Migration failed"
