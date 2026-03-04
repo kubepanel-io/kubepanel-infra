@@ -137,7 +137,7 @@ main() {
     print_progress "Updating package repositories..."
     run_cmd sudo apt update
     print_progress "Installing LVM2..."
-    run_cmd sudo apt install lvm2 -y
+    run_cmd sudo apt install lvm2 linux-headers-$(uname -r) -y
     print_success "Dependencies installed"
     
     print_progress "Installing MicroK8S (this may take a few minutes)..."

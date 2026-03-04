@@ -21,6 +21,19 @@ log_error() {
     return 0
 }
 
+# Configure settings.py EARLY - runs on every start, before marker check
+# This ensures settings are configured even if previous run created marker
+if [ -f "$DIR/kubepanel/settings.py" ]; then
+    # Check for EITHER placeholder - handles partial replacement from failed previous runs
+    if grep -qE "<KUBEPANEL_DOMAIN>|<MARIADB_ROOT_PASSWORD>" "$DIR/kubepanel/settings.py" 2>/dev/null; then
+        log "Configuring settings.py (placeholders detected)..."
+        # Use | as delimiter to avoid issues with special chars in password
+        sed -i "s|<KUBEPANEL_DOMAIN>|$KUBEPANEL_DOMAIN|g" "$DIR/kubepanel/settings.py"
+        sed -i "s|<MARIADB_ROOT_PASSWORD>|$MARIADB_ROOT_PASSWORD|g" "$DIR/kubepanel/settings.py"
+        log "Settings configured."
+    fi
+fi
+
 # Check if initialization was already completed successfully
 if [ -f "$INIT_MARKER" ]; then
     log "Initialization already completed (marker file exists). Skipping."
@@ -90,11 +103,12 @@ if [ -z "$entries" ] || [ "$entries" = "lost+found" ]; then
 
     # Step 4: Configure settings
     log "Step 4: Configuring settings.py..."
-    if ! sed -i "s;<KUBEPANEL_DOMAIN>;$KUBEPANEL_DOMAIN;g" "$DIR/kubepanel/settings.py"; then
+    # Use | as delimiter to avoid issues with special chars in password
+    if ! sed -i "s|<KUBEPANEL_DOMAIN>|$KUBEPANEL_DOMAIN|g" "$DIR/kubepanel/settings.py"; then
         log_error "Failed to configure KUBEPANEL_DOMAIN in settings.py"
         exit 1
     fi
-    if ! sed -i "s;<MARIADB_ROOT_PASSWORD>;$MARIADB_ROOT_PASSWORD;g" "$DIR/kubepanel/settings.py"; then
+    if ! sed -i "s|<MARIADB_ROOT_PASSWORD>|$MARIADB_ROOT_PASSWORD|g" "$DIR/kubepanel/settings.py"; then
         log_error "Failed to configure MARIADB_ROOT_PASSWORD in settings.py"
         exit 1
     fi
@@ -114,13 +128,17 @@ if [ -z "$entries" ] || [ "$entries" = "lost+found" ]; then
     fi
     log "Migrations completed successfully."
 
-    # Step 6: Create superuser
+    # Step 6: Create superuser (idempotent - check if exists first)
     log "Step 6: Creating superuser..."
-    if ! /usr/local/bin/python "$DIR/manage.py" createsuperuser --noinput; then
-        log_error "Failed to create superuser"
-        exit 1
+    if /usr/local/bin/python "$DIR/manage.py" shell -c "from django.contrib.auth import get_user_model; User = get_user_model(); exit(0 if User.objects.filter(is_superuser=True).exists() else 1)" 2>/dev/null; then
+        log "Superuser already exists, skipping creation."
+    else
+        if ! /usr/local/bin/python "$DIR/manage.py" createsuperuser --noinput; then
+            log_error "Failed to create superuser"
+            exit 1
+        fi
+        log "Superuser created successfully."
     fi
-    log "Superuser created successfully."
 
     # Step 7: Get node IPs
     log "Step 7: Gathering NODE_*_IP values from ConfigMap 'node-public-ips'..."
@@ -180,18 +198,19 @@ else
     # Try to complete any missing steps
     cd "$DIR"
 
-    # Ensure settings.py is configured (in case previous run failed before this step)
-    if grep -q "<KUBEPANEL_DOMAIN>" "$DIR/kubepanel/settings.py" 2>/dev/null; then
+    # Ensure settings.py is configured (fallback in case early block didn't run)
+    if grep -qE "<KUBEPANEL_DOMAIN>|<MARIADB_ROOT_PASSWORD>" "$DIR/kubepanel/settings.py" 2>/dev/null; then
         log "Configuring settings.py (placeholders still present)..."
-        if ! sed -i "s;<KUBEPANEL_DOMAIN>;$KUBEPANEL_DOMAIN;g" "$DIR/kubepanel/settings.py"; then
-            log_error "Failed to configure KUBEPANEL_DOMAIN in settings.py"
-            exit 1
-        fi
-        if ! sed -i "s;<MARIADB_ROOT_PASSWORD>;$MARIADB_ROOT_PASSWORD;g" "$DIR/kubepanel/settings.py"; then
-            log_error "Failed to configure MARIADB_ROOT_PASSWORD in settings.py"
-            exit 1
-        fi
-        log "Settings configured successfully."
+        sed -i "s|<KUBEPANEL_DOMAIN>|$KUBEPANEL_DOMAIN|g" "$DIR/kubepanel/settings.py"
+        sed -i "s|<MARIADB_ROOT_PASSWORD>|$MARIADB_ROOT_PASSWORD|g" "$DIR/kubepanel/settings.py"
+        log "Settings configured."
+    fi
+
+    # Run makemigrations for dashboard (required before migrate)
+    log "Running makemigrations for dashboard..."
+    if ! /usr/local/bin/python "$DIR/manage.py" makemigrations dashboard 2>&1 | tee -a "$INIT_LOG"; then
+        log_error "Failed to run makemigrations"
+        exit 1
     fi
 
     log "Running migrate to ensure database is up to date..."
@@ -200,7 +219,36 @@ else
         exit 1
     fi
 
-    log "Migration completed. Marking initialization as complete."
+    # Ensure superuser exists (idempotent)
+    log "Ensuring superuser exists..."
+    if /usr/local/bin/python "$DIR/manage.py" shell -c "from django.contrib.auth import get_user_model; User = get_user_model(); exit(0 if User.objects.filter(is_superuser=True).exists() else 1)" 2>/dev/null; then
+        log "Superuser already exists."
+    else
+        log "Creating superuser..."
+        if ! /usr/local/bin/python "$DIR/manage.py" createsuperuser --noinput; then
+            log_error "Failed to create superuser"
+            exit 1
+        fi
+        log "Superuser created successfully."
+    fi
+
+    # Load fixtures (loaddata is idempotent - updates existing records by PK)
+    log "Loading workloads fixture..."
+    if ! /usr/local/bin/python "$DIR/manage.py" loaddata "$DIR/dashboard/fixtures/workloads.json"; then
+        log_error "Failed to load workloads fixture"
+        exit 1
+    fi
+    log "Fixtures loaded successfully."
+
+    # Run firstrun (should be idempotent - creates ClusterIP records)
+    log "Running firstrun command..."
+    if ! /usr/local/bin/python "$DIR/manage.py" firstrun; then
+        log_error "Failed to run firstrun"
+        exit 1
+    fi
+    log "Firstrun completed successfully."
+
+    log "All recovery steps completed. Marking initialization as complete."
     date > "$INIT_MARKER"
 fi
 

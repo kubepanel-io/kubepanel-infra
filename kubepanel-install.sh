@@ -550,6 +550,9 @@ EOF
 
     echo -e "\n${CYAN}Please configure your DNS and then access Kubepanel at:${NC}"
     echo -e "${GREEN}https://$KUBEPANEL_DOMAIN${NC}\n"
+
+    # Create completion marker for automated provisioning systems
+    touch /var/log/kubepanel-install-complete
 }
 
 main
