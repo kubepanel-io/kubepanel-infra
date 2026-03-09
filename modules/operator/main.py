@@ -4704,7 +4704,7 @@ def generate_modsec_rules(rules: list, geo_block: dict = None) -> str:
     geo_enabled = geo_block and geo_block.get('enabled') and geo_block.get('blockedCountries')
     if geo_enabled:
         modsec_rules.append('# GeoIP Database for geo-blocking')
-        modsec_rules.append('SecGeoLookupDb /etc/ingress-controller/geoip/GeoLite2-Country.mmdb')
+        modsec_rules.append('SecGeoLookupDb /etc/ingress-controller/geoip/dbip-country-lite-2026-03.mmdb')
         modsec_rules.append('')
 
     # Generate rules
@@ -5313,7 +5313,7 @@ def generate_domain_modsec_rules(rules: list, geo_block: dict = None, protected_
 
     if geo_enabled or rules_need_geoip or protected_paths_need_geoip:
         modsec_rules.append('# GeoIP Database for geo-blocking')
-        modsec_rules.append('SecGeoLookupDb /etc/nginx/geoip/GeoLite2-Country.mmdb')
+        modsec_rules.append('SecGeoLookupDb /etc/nginx/geoip/dbip-country-lite-2026-03.mmdb')
         modsec_rules.append('')
 
     # Generate block rules

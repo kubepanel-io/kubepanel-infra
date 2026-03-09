@@ -17,8 +17,8 @@ RUN mkdir -p /etc/nginx/modsec
 
 # Download GeoIP database for geo-blocking support
 RUN mkdir -p /etc/nginx/geoip && \
-    curl -fsSL https://raw.githubusercontent.com/kubepanel-io/kubepanel/refs/heads/main/GeoLite2-Country.mmdb \
-    -o /etc/nginx/geoip/GeoLite2-Country.mmdb
+    curl -fsSL https://raw.githubusercontent.com/kubepanel-io/kubepanel/refs/heads/main/dbip-country-lite-2026-03.mmdb \
+    -o /etc/nginx/geoip/dbip-country-lite-2026-03.mmdb
 
 # Create minimal ModSecurity base config (since Ubuntu 24.04 doesn't include modsecurity.conf-recommended)
 RUN cat > /etc/nginx/modsec/modsecurity.conf << 'EOF'

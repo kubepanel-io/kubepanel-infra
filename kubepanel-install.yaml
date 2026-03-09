@@ -3328,7 +3328,7 @@ spec:
                       "initContainers": [{
                         "name": "geoip-downloader",
                         "image": "curlimages/curl:latest",
-                        "command": ["sh", "-c", "echo Downloading GeoIP database... && curl -fsSL https://raw.githubusercontent.com/kubepanel-io/kubepanel/refs/heads/main/GeoLite2-Country.mmdb -o /geoip/GeoLite2-Country.mmdb && echo Download complete."],
+                        "command": ["sh", "-c", "echo Downloading GeoIP database... && curl -fsSL https://raw.githubusercontent.com/kubepanel-io/kubepanel/refs/heads/main/dbip-country-lite-2026-03.mmdb -o /geoip/dbip-country-lite-2026-03.mmdb && echo Download complete."],
                         "volumeMounts": [{"name": "geoip-db", "mountPath": "/geoip"}]
                       }],
                       "volumes": [{"name": "geoip-db", "emptyDir": {}}],
