@@ -1,0 +1,109 @@
+# =============================================================================
+# License CRD - Manages KubePanel license validation and phone-home
+# =============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: licenses.kubepanel.io
+  annotations:
+    kubepanel.io/version: "v1alpha1"
+    kubepanel.io/description: "License resource for KubePanel licensing and usage tracking"
+spec:
+  group: kubepanel.io
+  names:
+    kind: License
+    listKind: LicenseList
+    plural: licenses
+    singular: license
+    shortNames:
+      - lic
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Tier
+          type: string
+          jsonPath: .status.tier
+        - name: Valid
+          type: boolean
+          jsonPath: .status.valid
+        - name: Domains
+          type: string
+          jsonPath: .status.domainsUsed
+        - name: MaxDomains
+          type: integer
+          jsonPath: .status.maxDomains
+        - name: Expires
+          type: string
+          jsonPath: .status.expiresAt
+        - name: LastPhoneHome
+          type: string
+          jsonPath: .status.lastPhoneHome
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              properties:
+                licenseKey:
+                  type: string
+                  description: "Signed license key (base64-encoded payload.signature)"
+            status:
+              type: object
+              properties:
+                valid:
+                  type: boolean
+                  description: "Whether the license is currently valid"
+                tier:
+                  type: string
+                  description: "License tier"
+                  enum:
+                    - community
+                    - pro
+                    - premium
+                    - enterprise
+                customerName:
+                  type: string
+                  description: "Customer name from license"
+                customerId:
+                  type: string
+                  description: "Customer ID from license"
+                maxDomains:
+                  type: integer
+                  description: "Maximum allowed domains (-1 for unlimited)"
+                domainsUsed:
+                  type: integer
+                  description: "Current domain count"
+                expiresAt:
+                  type: string
+                  format: date-time
+                  description: "License expiration timestamp"
+                lastPhoneHome:
+                  type: string
+                  format: date-time
+                  description: "Last successful phone-home timestamp"
+                phoneHomeFailures:
+                  type: integer
+                  description: "Consecutive phone-home failure count"
+                gracePeriodEndsAt:
+                  type: string
+                  format: date-time
+                  description: "Grace period end timestamp (if in grace period)"
+                message:
+                  type: string
+                  description: "Human-readable status message"
+                features:
+                  type: array
+                  items:
+                    type: string
+                  description: "Enabled features for this license"

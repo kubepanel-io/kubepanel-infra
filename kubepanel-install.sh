@@ -435,8 +435,10 @@ main() {
     
     print_step "8" "Kubepanel Configuration"
     YAML_FILE="kubepanel-install.yaml"
+    LICENSE_CRD="kubepanel-license-crd.yaml"
     print_progress "Downloading Kubepanel configuration..."
     download_yaml "$GITHUB_URL" "$YAML_FILE"
+    download_yaml "$GITHUB_URL" "$LICENSE_CRD"
     print_progress "Customizing configuration..."
     replace_placeholders "$YAML_FILE" "$DJANGO_SUPERUSER_EMAIL" "$DJANGO_SUPERUSER_USERNAME" "$DJANGO_SUPERUSER_PASSWORD" "$KUBEPANEL_DOMAIN"
     print_success "Configuration prepared"
@@ -447,6 +449,9 @@ main() {
     print_success "Piraeus operator ready"
     
     print_progress "Deploying Kubepanel..."
+    
+    run_cmd_critical kubectl apply -f $LICENSE_CRD
+    run_cmd microk8s kubectl wait --for=condition=Established crd/licenses.kubepanel.io --timeout=30s
     run_cmd_critical kubectl apply -f $YAML_FILE
     
     check_deployment_status
