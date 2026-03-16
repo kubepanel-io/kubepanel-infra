@@ -151,11 +151,13 @@ if [ "$VERSION_PARAM" == "dev" ]; then
     # Development mode: use main branch
     INSTALL_VERSION="main"
     GITHUB_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/refs/heads/main/kubepanel-install.yaml"
+    LICENSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/refs/heads/main/kubepanel-license-crd.yaml"
     echo -e "${YELLOW}Installing from development branch (main)${NC}"
 elif [ -n "$VERSION_PARAM" ]; then
     # Specific version provided
     INSTALL_VERSION="$VERSION_PARAM"
     GITHUB_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/refs/tags/${VERSION_PARAM}/kubepanel-install.yaml"
+    LICENSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/refs/heads/main/kubepanel-license-crd.yaml"
     echo -e "${GREEN}Installing version: ${VERSION_PARAM}${NC}"
 else
     # No version specified: fetch latest release from GitHub API
@@ -165,9 +167,11 @@ else
         echo -e "${YELLOW}Could not fetch latest release, using main branch${NC}"
         INSTALL_VERSION="main"
         GITHUB_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/refs/heads/main/kubepanel-install.yaml"
+        LICENSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/refs/heads/main/kubepanel-license-crd.yaml"
     else
         INSTALL_VERSION="$LATEST_VERSION"
         GITHUB_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/refs/tags/${LATEST_VERSION}/kubepanel-install.yaml"
+        LICENSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/refs/heads/main/kubepanel-license-crd.yaml"
         echo -e "${GREEN}Installing latest release: ${LATEST_VERSION}${NC}"
     fi
 fi
@@ -438,7 +442,7 @@ main() {
     LICENSE_CRD="kubepanel-license-crd.yaml"
     print_progress "Downloading Kubepanel configuration..."
     download_yaml "$GITHUB_URL" "$YAML_FILE"
-    download_yaml "$GITHUB_URL" "$LICENSE_CRD"
+    download_yaml "$LICENSE_URL" "$LICENSE_CRD"
     print_progress "Customizing configuration..."
     replace_placeholders "$YAML_FILE" "$DJANGO_SUPERUSER_EMAIL" "$DJANGO_SUPERUSER_USERNAME" "$DJANGO_SUPERUSER_PASSWORD" "$KUBEPANEL_DOMAIN"
     print_success "Configuration prepared"
